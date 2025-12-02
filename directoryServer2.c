@@ -9,6 +9,12 @@
 #include "inet.h"
 #include "common.h"
 
+#include <openssl/crypto.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
          (var) && ((tvar) = LIST_NEXT((var), field), 1); \

@@ -8,6 +8,12 @@
 #include "inet.h"
 #include "common.h"
 
+#include <openssl/crypto.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 int connect_to_server(const char *ip, int port) {
     int sockfd;
     struct sockaddr_in serv_addr;
