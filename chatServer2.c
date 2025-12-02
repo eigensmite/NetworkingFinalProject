@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -8,71 +9,71 @@
 #include "inet.h"
 #include "common.h"
 
-#define MAX_USERNAME_LEN 24
-
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
          (var) && ((tvar) = LIST_NEXT((var), field), 1); \
          (var) = (tvar))
 
-struct client {
+#define TAILQ_FOREACH_SAFE(var, head, field, tvar)        \
+    for ((var) = TAILQ_FIRST((head));                     \
+         (var) && ((tvar) = TAILQ_NEXT((var), field), 1); \
+         (var) = (tvar))
+
+/* struct client {
     int sockfd;                     // client socket
     struct sockaddr_in addr;        // client address
 	char nickname[MAX_USERNAME_LEN];// client nickname
     LIST_ENTRY(client) entries;     // BSD list linkage
+}; */
+
+struct outmsg {
+	size_t len;       // total bytes
+    size_t sent;      // bytes already sent (for partial writes)
+	char* data;       // full message text
+    TAILQ_ENTRY(outmsg) entries;
+};
+
+struct client {
+    int sockfd;                     	// client socket
+    struct sockaddr_in addr;        	// client address
+	char nickname[MAX_USERNAME_LEN];	// client nickname
+	TAILQ_HEAD(, outmsg) msgq;  		// message queue
+	char inbuf[MAX];			  		// input buffer
+	char* inptr;                    	// length of data in input buffer (bytes)
+    LIST_ENTRY(client) client_entries;  // BSD list linkage
 };
 
 LIST_HEAD(clientlist, client);
 
+static int connect_to_directory(const char *server_name, int port);
 
-void broadcast_message(struct clientlist *clients, int sender_sockfd, const char *message) {
-	struct client *c;
-	LIST_FOREACH(c, clients, entries) {
-		if (c->sockfd != sender_sockfd) { // Don't send the message back to the sender
-			write(c->sockfd, message, MAX);
-		}
-	}
-}
+static void queue_message(struct client *c, const char *msg);
+static void broadcast_message(struct clientlist *clients, int sender_sockfd, const char *message);
+static void remove_client(struct clientlist *clients, struct client *c);
 
-int connect_to_directory(const char *server_name, int port) {
-    int sockfd;
-    struct sockaddr_in dir_addr;
-    memset(&dir_addr, 0, sizeof(dir_addr));
-    dir_addr.sin_family = AF_INET;
-    dir_addr.sin_addr.s_addr = htonl(INADDR_ANY); // inet_addr(SERV_HOST_ADDR);
-    dir_addr.sin_port = htons(SERV_TCP_PORT);
 
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket");
-        return -1;
-    }
-
-    if (connect(sockfd, (struct sockaddr *)&dir_addr, sizeof(dir_addr)) < 0) {
-        perror("connect to directory server");
-        close(sockfd);
-        return -1;
-    }
-
-    // Send handshake: "SERVER <server_name>"
-    char handshake[MAX];
-    snprintf(handshake, sizeof(handshake), "SERVER %s %d", server_name, port);
-    if (write(sockfd, handshake, strlen(handshake)) < 0) {
-        perror("handshake failed");
-        close(sockfd);
-        return -1;
-    }
-
-    return sockfd; // idle connection
-}
 
 int main(int argc, char **argv)
 {
+	// Check command line arguments
 	if (argc != 3) {
         fprintf(stderr, "Usage: %s <server_name> <port>\n", argv[0]);
         return EXIT_FAILURE;
     }
-	const char *server_name = argv[1];
-    int port = atoi(argv[2]);
+	
+	// Extract server name
+	char server_name[MAX_USERNAME_LEN] = {0};
+	snprintf(server_name, MAX_USERNAME_LEN, "%.*s", MAX_USERNAME_LEN - 1, argv[1]);
+	printf("%.*s\n", MAX_USERNAME_LEN - 1, argv[1]);
+	server_name[MAX_USERNAME_LEN - 1] = '\0';
+
+	// Extract port number
+    int port;
+	if(sscanf(argv[2], "%d", &port) != 1) {
+		fprintf(stderr, "Invalid port number: %s\n", argv[2]);
+		return EXIT_FAILURE;
+	}	
+	
 
 
 	struct clientlist clients;          // the head of the client list
@@ -81,7 +82,6 @@ int main(int argc, char **argv)
 
 	int sockfd;			/* Listening socket */
 	struct sockaddr_in cli_addr, serv_addr;
-	fd_set readset;
 
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -90,7 +90,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Add SO_REUSEADDRR option to prevent address in use errors (modified from: "Hands-On Network
-* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
+	 * Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	int true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
@@ -100,16 +100,16 @@ int main(int argc, char **argv)
 	/* Bind socket to local address */
 	memset((char *) &serv_addr, 0, sizeof(serv_addr));
 	serv_addr.sin_family 		= AF_INET;
-	serv_addr.sin_addr.s_addr 	= inet_addr(SERV_HOST_ADDR);	/* hard-coded in inet.h */
-	serv_addr.sin_port			= htons(port);					/* parameter */
+	serv_addr.sin_addr.s_addr 	= htonl(INADDR_ANY);	/* arbitrary IP address */
+	serv_addr.sin_port			= htons(port);			/* port from parameter */
 
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
 		perror("server: can't bind local address");
+		close(sockfd); // unncessary, but good practice
 		return EXIT_FAILURE;
 	}
 
-
-	printf("Server running on %s:%d\n", SERV_HOST_ADDR, port);
+	printf("Server running on %s:%d\n", inet_ntoa(serv_addr.sin_addr), port);
 	listen(sockfd, MAX_CLIENTS);
 
 	int dir_sock = connect_to_directory(server_name, port);
@@ -124,146 +124,164 @@ int main(int argc, char **argv)
     }
 
 	for (;;) {
-		// int clisockfd;		/* EXAMPLE ONLY! */
+
+		fd_set readset, writeset;
+		int max_fd = -1;
 
 		/* Initialize and populate your readset and compute maxfd */
 		FD_ZERO(&readset);
+		FD_ZERO(&writeset);
+
+		// Add directory server socket
+		FD_SET(dir_sock, &readset);
+		if (dir_sock > max_fd) max_fd = dir_sock;
+
+		// Add listening socket to read set
 		FD_SET(sockfd, &readset);
-		/* We won't write to a listening socket so no need to add it to the writeset */
-		int max_fd = sockfd;
+		if (sockfd > max_fd) max_fd = sockfd;
 
 		/* FIXME: Populate readset with ALL your client sockets here,
-		 * e.g., using LIST_FOREACH */
+		 * e.g., using LIST_FOREACH_SAFE */
 		/* clisockfd is used as an example socket -- we never populated it so it's invalid */		
 		struct client *c, *tmp;
-		LIST_FOREACH(c, &clients, entries) {
-			int clisockfd = c->sockfd;
-    		if (clisockfd > 0) {          // sanity check (usually always > 0)
-        		FD_SET(clisockfd, &readset);  // add to read set
-				/* Compute max_fd as you go */
-        		if (clisockfd > max_fd) {max_fd = clisockfd;}
+		LIST_FOREACH_SAFE(c, &clients, client_entries, tmp) {
+    		if (c->sockfd > 0) {          			// sanity check (usually always > 0)
+        		FD_SET(c->sockfd, &readset);  		// add to read set
+				if (!TAILQ_EMPTY(&c->msgq)) {		// has data to write
+					FD_SET(c->sockfd, &writeset); 	// add to write set
+				}
+				/* Update max_fd */
+        		if (c->sockfd > max_fd) max_fd = c->sockfd;
 			}
 		}
 
+		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
+		if (sel < 0) {
+            if (errno == EINTR) continue;
+            perror("select");
+            break;
+        } else if (sel == 0) continue; /* shouldn't happen with NULL timeout */
 
-		if (select(max_fd+1, &readset, NULL, NULL, NULL) > 0) {
 
-			/* Check to see if our listening socket has a pending connection */
-			if (FD_ISSET(sockfd, &readset)) {
-				/* Accept a new connection request */
-				socklen_t clilen = sizeof(cli_addr);
-				int newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
-				if (newsockfd < 0) {
-					perror("server: accept error");
-					close (newsockfd);
-					continue;
-					//close(sockfd);
-					//return EXIT_FAILURE;
-				} else {
-					/* FIXME: Add newsockfd to your list of clients -- but no nickname yet */
-					/* We can't immediately read(newsockfd) because we haven't asked
-					* select whether it's ready for reading yet */
-					
-					int count = 0;
-					LIST_FOREACH(c, &clients, entries) {
-						count++;
-					}
+		// Check if directory server disconnected
+		if (FD_ISSET(dir_sock, &readset)) { 
+			// If directory server socket is readable 
+			// (only possible if disconnected)
+			fprintf(stderr, "Disconnected. Check dir server to see cause\n");
+			fprintf(stderr, "1) non-unique topic,\n");
+			fprintf(stderr, "2) maximum servers reached, or\n");
+			fprintf(stderr, "3) directory server died\n");
+			close(dir_sock);
+			close(sockfd);
+			return EXIT_FAILURE;
+		}
 
-					if (count >= MAX_CLIENTS) {
-						fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
-						close(newsockfd);
-						continue;  // skip the rest of this iteration
-					}
-
-					/*struct client * */c = malloc(sizeof(struct client));
-					c->sockfd = newsockfd;
-					c->addr = cli_addr;
-					c->nickname[0] = '\0';  // no nickname yet
-					
-
-					LIST_INSERT_HEAD(&clients, c, entries);  // insert at the head
-					printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
-				}
-
+		/* ADD NEW CLIENT (Check to see if our listening socket has a pending connection) */
+		if (FD_ISSET(sockfd, &readset)) {
+			/* Accept a new connection request */
+			socklen_t clilen = sizeof(cli_addr);
+			int newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+			if (newsockfd < 0) {
+				perror("server: accept error");
+				close (newsockfd); // CAN'T CLOSE INVALID SOCKET, but close() will return -1 for now and its fine (good template handling socket errors anyways)
+				continue;				
 			}
 
-			/* TODO: Check ALL your client sockets, e.g., using LIST_FOREACH */
-			LIST_FOREACH_SAFE(c, &clients, entries, tmp) {
-				/*
-				if (FD_ISSET(c->sockfd, &readset)) {      // client ready
-					char s[MAX] = {'\0'};
-					int n = read(c->sockfd, s, sizeof(s)-1);
+			/* Set non-blocking on this client socket */
+			if (fcntl(newsockfd, F_SETFL, O_NONBLOCK) < 0) {
+				perror("fcntl client O_NONBLOCK");
+				close (newsockfd);
+				continue;
+			}
+			
+			int count = 0;
+			LIST_FOREACH_SAFE(c, &clients, client_entries, tmp) { count++; }
 
-					if (n <= 0) {                          // disconnected or error
-						printf("Client %d disconnected\n", c->sockfd);
-						close(c->sockfd);
-						LIST_REMOVE(c, entries);
-						free(c);
-					} else {
-						s[n] = '\0';
-						printf("Received from client %d: %s\n", c->sockfd, s);
-						write(c->sockfd, s, n);       // optional echo
-					}
+			if (count >= MAX_CLIENTS) {
+				fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
+				close(newsockfd);
+				continue;  // skip the rest of this iteration
+			}
+
+			c = malloc(sizeof(struct client));
+			if (!c) {
+				fprintf(stderr, "server: out of memory\n");
+				close (newsockfd);
+				continue;
+			}
+
+			c->sockfd = newsockfd; 	// set client socket
+			c->addr = cli_addr;		// set client address
+			c->nickname[0] = '\0';  // no nickname yet
+			//c->outbuf[0] = '\0';    // initialize output buffer
+			//c->outlen = 0;          // empty output buffer
+			TAILQ_INIT(&c->msgq);	// initialize message queue
+			c->inbuf[0] = '\0';     // initialize input buffer
+			c->inptr = c->inbuf;    // set input pointer to start of
+			
+			LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
+			printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
+		}
+
+		/* PROCESS CLIENTS  */
+		LIST_FOREACH_SAFE(c, &clients, client_entries, tmp) {
+
+			int clisockfd = c->sockfd;
+
+			/* READABLE? */
+			if (FD_ISSET(clisockfd, &readset)) {
+
+				/* Read the request from the client */
+				ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+				printf("Read %zd bytes from client %d\n", nread, clisockfd);
+
+				// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
+				// THE FORMULA FOR READING fIS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
+				// AT END OF BUFFER. AS OF NOW, &(c->inbuf[MAX]) - c->inptr IS THE CORRECT FORMULA.
+				if (nread == 0) { 
+                    /* orderly shutdown by client */
+                    char msg[MAX];
+                    snprintf(msg, sizeof(msg), "<Server> %s has left the chat.", c->nickname);
+                    broadcast_message(&clients, clisockfd, msg);
+                    remove_client(&clients, c);
+                    //continue; /* c is freed - continue with next in loop */
 				}
-				*/
+				else if (nread < 0) {
+					//fprintf(stderr, "%s:%d Error reading from client\n", __FILE__, __LINE__);
 
-				int clisockfd = c->sockfd;
+					/* Not every error is fatal. Check the return value and act accordingly. */
+					if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
 
-				/* clisockfd is used as an example socket -- we never populated it so
-				* it's invalid */
-				//int clisockfd;
-				/* Note that this is a seperate if, not an else if -- multiple sockets
-				* may become ready */
-				if (FD_ISSET(clisockfd, &readset)) {
+					/* real error reading from client */
+					fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, strerror(errno));
+					char msg[MAX];
+					snprintf(msg, sizeof(msg), "<Server> %s has left the chat.", c->nickname);
+					broadcast_message(&clients, clisockfd, msg);
+					remove_client(&clients, c);
+					//continue;
+				}
+				else /* if (nread > 0) */ {
+				
+					//fprintf(stderr, "Read %zd bytes from client %d\n", nread, clisockfd);
+					c->inptr += nread; // advance input pointer
+					//if (! (c->inptr >= &(c->inbuf[MAX]))) continue; // not a full message yet
+					if ((c->inptr < &(c->inbuf[MAX]))) continue; // not a full message yet
 
-					/* FIXME: Modify the logic */
+					c->inbuf[MAX - 1] = '\0';   // ensure null-termination
+					c->inptr = c->inbuf; // reset input pointer for next read
 
+					//else inbuf[nread] = '\0';  // null-terminate the string
 
-					char s[MAX] = {'\0'};
-
-					/* Read the request from the client */
-					/* FIXME: This may block forever since we haven't asked select
-						whether clisockfd is ready */
-					ssize_t nread = read(clisockfd, s, MAX);
-					printf("Read %zd bytes from client %d\n", nread, clisockfd);
-					if (nread <= 0) {
-						/* Not every error is fatal. Check the return value and act accordingly. */
-						fprintf(stderr, "%s:%d Error reading from client\n", __FILE__, __LINE__);
-						
-						char message[MAX];
-						snprintf(message, sizeof(message), "<Server> %s has left the chat.", c->nickname);
-						broadcast_message(&clients, clisockfd, message);
-
-						close (clisockfd);
-						LIST_REMOVE(c, entries); // inside LIST_FOREACH_SAFE, so safe to remove
-						free(c);
-						continue;
-						//return EXIT_FAILURE;
-					}
-
-					if (nread < MAX) s[nread] = '\0';  // null-terminate the string
-					else s[MAX - 1] = '\0'; // ensure null-termination
-
-					if (c->nickname[0] == '\0') {
-
-						// Trim newline if present
-						// Safe to ingnore warning because fmt is not user-controlled
-						char fmt[20];
-						snprintf(fmt, sizeof(fmt), "%%%d[^\n]", MAX - 1);
-						#pragma GCC diagnostic push
-						#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-						sscanf(s, fmt, s);
-						#pragma GCC diagnostic pop
-
+					if (c->nickname[0] == '\0') { // NICKNAME ASSIGNMENT
 
 						// Check if this username is already taken
 						// Check if first user
 						int taken = 0;
 						int alone = 1;
 						struct client *other;
-						LIST_FOREACH(other, &clients, entries) {
+						LIST_FOREACH_SAFE(other, &clients, client_entries, tmp) {
 							if (other != c && other->nickname[0] != '\0') {
-								if (strncmp(other->nickname, s, MAX_USERNAME_LEN - 1) == 0) {
+								if (strncmp(other->nickname, c->inbuf, MAX_USERNAME_LEN - 1) == 0) {
 									taken = 1;
 									break;
 								}
@@ -271,59 +289,169 @@ int main(int argc, char **argv)
 							}
 						}
 
-						if (!taken && s[0] != '\0') {
-							// Username available, assign it
-							// strncpy(c->nickname, s, MAX_USERNAME_LEN - 1);
-							snprintf(c->nickname, MAX_USERNAME_LEN, "%.*s", MAX_USERNAME_LEN - 1, s);
-							c->nickname[MAX_USERNAME_LEN-1] = '\0';
-							if (alone) {
-								snprintf(s, MAX, "Welcome, %s! You are the first user here.", c->nickname);
-							} else {
-								snprintf(s, MAX, "Welcome, %s! There are other users here.", c->nickname);
+						if (!taken && c->inbuf[0] != '\0') {
+
+							if(sscanf(c->inbuf, " %23[^\n]", c->nickname) != 1) {
+								// Failed to read username
+								queue_message(c, "Invalid username, try again:");
+								continue; // Ask again
 							}
-							write(clisockfd, s, MAX);
+							//snprintf(c->inbuf, MAX_USERNAME_LEN, "%s", c->nickname);
+
+							c->nickname[MAX_USERNAME_LEN-1] = '\0';
+
+							// Send welcome message
+							char welcome[MAX];
+							if (alone) snprintf(welcome, MAX, "<Server→You> Welcome, %s! You are the first user here.", c->nickname);
+							else snprintf(welcome, MAX, "<Server→You> Welcome, %s! There are other users here.", c->nickname);
+							
+							queue_message(c, welcome);
+							//queue_message(c, "You can now start sending messages.\n");
+							//queue_message(c, "-------------------------------------------------\n");
+							//queue_message(c, "To change your nickname, disconnect and reconnect\n");
+							//queue_message(c, "NOT SURE WHAT'S GOING ON HERE? CHECK OUT THE README FILE..............\n");
+
 							char message[MAX];
 							snprintf(message, MAX, "<Server> %s has joined the chat.", c->nickname);
 							broadcast_message(&clients, clisockfd, message);
 							continue; // Done processing this client
 						} else {
 							// Username taken or invalid
-							snprintf(s, MAX, "Username unavailable or invalid, try again:");
-							write(clisockfd, s, MAX);
+							queue_message(c, "Username unavailable or invalid, try again:\0");
 							continue; // Ask again
 						}
 
-					} else{
+					} else { // NORMAL MESSAGE PROCESSING
 
-						/* Generate an appropriate reply based on the first character of the client's message */
+						if (c->inbuf[0] == '\0') continue; // empty message, ignore
 
-						if (s[0] == /* FIXME */ true) {
-							/* YOUR LOGIC GOES HERE */
-						}
-						else if (s[0] == /* FIXME */ true) {
-							/* YOUR LOGIC GOES HERE */
-						}
-						/* YOUR LOGIC GOES HERE */
-						else {
-							//snprintf(s, MAX, "Invalid request\n\0");
-						}
-						
 						char message[MAX + MAX_USERNAME_LEN + 4];
-						snprintf(message, sizeof(message), "[%s] %s", c->nickname, s);
+						snprintf(message, sizeof(message), "[%s] %s", c->nickname, c->inbuf);
 
 						// if message is too long, broadcast_message will truncate it
 						// to MAX length, which is fine
 						broadcast_message(&clients, clisockfd, message);
-
-						//fprintf(stderr, s);
-						/* Send the reply to the client */
-						//write(clisockfd, s, MAX);
+						
+						// this is to queue the message back to the sender as well
+						// only use if you are overwriting the message in the client window
+							// snprintf(message, sizeof(message), "[You] %s", c->inbuf);	
+							//queue_message(c, message);
 					}
 				}
-			}
+			} /* FD_ISSET read */
+
+			/* WRITABLE? */
+			if (FD_ISSET(clisockfd, &writeset)) {
+				struct outmsg *m = TAILQ_FIRST(&c->msgq);
+				if (!m) continue;   // no messages queued
+
+				size_t remaining = m->len - m->sent;
+
+				ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
+				if (nwrite > 0) {
+					m->sent += nwrite;
+					if (m->sent == m->len) {
+						TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
+						free(m->data);
+						free(m);
+					}
+				} else if (nwrite < 0) {
+					if (errno == EAGAIN || errno == EWOULDBLOCK) {
+						// try later 
+					} else {
+						fprintf(stderr, "Error writing to client %d: %s\n", clisockfd, strerror(errno));
+						remove_client(&clients, c);
+						continue;
+					}
+				} 
+            } /*    FD_ISSET write */
+		} /*     LIST_FOREACH_SAFE */
+	} /*                  for (;;) */
+}
+
+static int connect_to_directory(const char *server_name, int port) {
+    int sockfd;
+    struct sockaddr_in dir_addr;
+    memset(&dir_addr, 0, sizeof(dir_addr));
+    dir_addr.sin_family = AF_INET;
+    dir_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dir_addr.sin_port = htons(SERV_TCP_PORT);
+
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket");
+        return -1;
+    }
+
+    if (connect(sockfd, (struct sockaddr *)&dir_addr, sizeof(dir_addr)) < 0) {
+        perror("connect to directory server");
+        close(sockfd);
+        return -1;
+    }
+
+    // Send handshake: "SERVER <server_name>"
+    char handshake[MAX] = {0};
+    snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
+	printf("Sending handshake to directory server.\n\tHandshake: %s", handshake);
+    if (write(sockfd, handshake, MAX) < 0) {
+        perror("handshake failed");
+        close(sockfd);
+        return -1;
+    }
+
+    return sockfd; // idle connection
+}
+
+
+static void queue_message(struct client *c, const char *msg) {
+	size_t mlen = strnlen(msg, MAX);
+    if (mlen == 0) return;
+
+    struct outmsg *m = malloc(sizeof(*m));
+    if (!m) {
+		fprintf(stderr, "can't malloc new outmsg struct, server: out of memory\n");
+		return;
+	}
+
+	m->data = malloc(mlen + 1);
+    if (!m->data) {
+		fprintf(stderr, "can't malloc new outmsg data, server: out of memory\n");
+        free(m);
+        return;
+    }
+
+	//memcpy(m->data, msg, mlen);
+    //m->data[mlen] = '\0';
+	snprintf(m->data, mlen + 1, "%s", msg); // ensure null-termination
+
+    m->len = mlen;
+    m->sent = 0;
+
+	TAILQ_INSERT_TAIL(&c->msgq, m, entries);
+}
+
+static void broadcast_message(struct clientlist *clients, int sender_sockfd, const char *message) {
+    struct client *c, *tmp;
+    LIST_FOREACH_SAFE(c, clients, client_entries, tmp) {
+		// fprintf(stderr, "Broadcasting message to client %d from sender client %d\n", c->sockfd, sender_sockfd);
+        if (c->sockfd != sender_sockfd) { // Don't send the message back to the sender
+            queue_message(c, message);
+        }
+    }
+}
+
+static void remove_client(struct clientlist *clients, struct client *c) {
+    if (clients && c) {
+		printf("Removing client %d (%s)\n", c->sockfd, c->nickname);
+
+		struct outmsg *m, *tmp;
+		TAILQ_FOREACH_SAFE(m, &c->msgq, entries, tmp) {
+			TAILQ_REMOVE(&c->msgq, m, entries);
+			free(m->data);
+			free(m);
 		}
-		else {
-			/* Handle select errors */
-		}
+
+		close(c->sockfd);
+		LIST_REMOVE(c, client_entries);
+		free(c);
 	}
 }

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <sys/select.h>
 #include <sys/types.h>
@@ -42,7 +43,9 @@ int main()
     fprintf(stderr, "Connected to directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
 	
     /* --- Send initial CLIENT handshake --- */
-    if (write(dir_sock, "CLIENT", 6) < 0) {
+    char handshake[MAX] = {0}; 
+    snprintf(handshake, sizeof(handshake), "CLIENT\n");
+    if (write(dir_sock, handshake, MAX) < 0) {
         perror("Error sending CLIENT handshake");
         close(dir_sock);
         return EXIT_FAILURE;
@@ -110,8 +113,11 @@ int main()
 
                 /* Read user input */
                 if (fgets(buf, MAX, stdin)) {
-                    size_t len = strcspn(buf, "\n");
-                    buf[len] = '\0';
+                    
+                    if (strnlen(buf, MAX) > 0 && buf[strnlen(buf, MAX) - 1] == '\n') {
+                        buf[strnlen(buf, MAX) - 1] = '\0'; // Remove newline
+                    }
+
                     write(dir_sock, buf, MAX);
                 } else {
 					fprintf(stderr, "Error reading user input\n");

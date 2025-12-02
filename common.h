@@ -13,4 +13,7 @@
 
 #define MAX 100
 
+#define MAX_USERNAME_LEN 24
+
 #define MAX_CLIENTS 5
+#define MAX_SERVERS 2

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -8,15 +9,17 @@
 #include "inet.h"
 #include "common.h"
 
-#define MAX_USERNAME_LEN 24
-
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
          (var) && ((tvar) = LIST_NEXT((var), field), 1); \
          (var) = (tvar))
 
+#define TAILQ_FOREACH_SAFE(var, head, field, tvar)        \
+    for ((var) = TAILQ_FIRST((head));                     \
+         (var) && ((tvar) = TAILQ_NEXT((var), field), 1); \
+         (var) = (tvar))
 
-struct client {
+/* struct client {
     int sockfd;                     // client socket
     struct sockaddr_in addr;        // client address
 	char nickname[MAX_USERNAME_LEN];// client nickname
@@ -30,47 +33,68 @@ struct server {
 	int listen_port;			    // server listening port
 	LIST_ENTRY(server) entries;     // BSD list linkage
 };
+*/
 
+struct outmsg {
+	size_t len;       // total bytes
+    size_t sent;      // bytes already sent (for partial writes)
+	char* data;       // full message text
+    TAILQ_ENTRY(outmsg) entries;
+};
 
+struct staged_connection {
+	int sockfd;                     	// client socket
+	struct sockaddr_in addr;        	// client address
+	char inbuf[MAX];			  		// input buffer
+	char* inptr;                    	// length of data in input buffer (bytes)
+	LIST_ENTRY(staged_connection) entries;  // BSD list linkage
+};
+
+struct client {
+    int sockfd;                     	// client socket
+    struct sockaddr_in addr;        	// client address
+	char nickname[MAX_USERNAME_LEN];	// client nickname
+	char redirecting;					// whether client is being redirected
+	TAILQ_HEAD(, outmsg) msgq;  		// message queue
+	char inbuf[MAX];			  		// input buffer
+	char* inptr;                    	// length of data in input buffer (bytes)
+    LIST_ENTRY(client) client_entries;  // BSD list linkage
+};
+
+struct server {
+    int sockfd;                     	// server socket
+    struct sockaddr_in addr;        	// server address
+	int listen_port;			    	// server listening port
+	char topic[MAX_USERNAME_LEN];		// server topic
+	// TAILQ_HEAD(, outmsg) msgq;  		// message queue
+	// char inbuf[MAX];			  		// input buffer
+	// char* inptr;                    	// length of data in input buffer (bytes)
+    LIST_ENTRY(server) server_entries;  // BSD list linkage
+};
+
+LIST_HEAD(staged_connection_list, staged_connection);
 LIST_HEAD(clientlist, client);
 LIST_HEAD(serverlist, server);
 
-static size_t safe_strnlen(const char *s, size_t max_len) {
-    size_t i;
-    for (i = 0; i < max_len && s[i] != '\0'; i++);
-    return i;
-}
 
-
-void broadcast_serverlist(struct serverlist *servers, int client_sockfd) {
-	struct server *s;
-	char listbuf[MAX];
-	listbuf[0] = '\0';
-	int idx = 1;
-	LIST_FOREACH(s, servers, entries) {
-		char line[MAX];
-		snprintf(line, sizeof(line), "%d. %s\n", idx++, s->topic);
-		strncat(listbuf, line, MAX - safe_strnlen(listbuf, MAX) - 1);
-	}
-
-	if (idx == 1) {
-		snprintf(listbuf, sizeof(listbuf), "No servers available.\n");
-	}
-
-	write(client_sockfd, listbuf, safe_strnlen(listbuf, MAX)); // send the list
-}
+void broadcast_serverlist(struct serverlist *servers, struct client *c);
+static void remove_client(struct clientlist *clients, struct client *c);
+static void remove_staged_connection(struct staged_connection_list *staged_conns, struct staged_connection *staged);
+static void remove_server(struct serverlist *servers, struct server *s);
+static void queue_message(struct client *c, const char *msg);
 
 int main(int argc, char **argv)
 {
 	struct clientlist clients;          // the head of the client list
 	struct serverlist servers;          // the head of the server list
+	struct staged_connection_list staged_conns; // the head of the staged connections list
 	LIST_INIT(&clients);
 	LIST_INIT(&servers);
+	LIST_INIT(&staged_conns);
 
 	//#region setup_listen_socket
 	int sockfd;			/* Listening socket */
 	struct sockaddr_in cli_addr, serv_addr;
-	fd_set readset;
 
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
@@ -79,7 +103,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Add SO_REUSEADDRR option to prevent address in use errors (modified from: "Hands-On Network
-* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
+     * Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	int true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
@@ -94,46 +118,78 @@ int main(int argc, char **argv)
 
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
 		perror("server: can't bind local address");
+		close(sockfd); // unncessary, but good practice
 		return EXIT_FAILURE;
 	}
 
 	printf("Server running on %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
 
-	listen(sockfd, 5);
+	listen(sockfd, MAX_CLIENTS + MAX_SERVERS);
 	//#endregion setup_listen_socket
 
 	for (;;) {
-		// int clisockfd;		/* EXAMPLE ONLY! */
+		
+		fd_set readset, writeset;
 
 		/* Initialize and populate your readset and compute maxfd */
 		FD_ZERO(&readset);
+		FD_ZERO(&writeset);
+
+		// Add listening socket to read set
 		FD_SET(sockfd, &readset);
-		/* We won't write to a listening socket so no need to add it to the writeset */
 		int max_fd = sockfd;
 
 		/* FIXME: Populate readset with ALL your client sockets here,
 		 * e.g., using LIST_FOREACH */
 		/* clisockfd is used as an example socket -- we never populated it so it's invalid */		
 		struct client *c, *tmp_c;
-		LIST_FOREACH(c, &clients, entries) {
-			int clisockfd = c->sockfd;
-    		if (clisockfd > 0) {          // sanity check (usually always > 0)
+		LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) {
+			/*	int clisockfd = c->sockfd;
+    		 if (clisockfd > 0) {          // sanity check (usually always > 0)
         		FD_SET(clisockfd, &readset);  // add to read set
-				/* Compute max_fd as you go */
+				// Compute max_fd as you go 
         		if (clisockfd > max_fd) {max_fd = clisockfd;}
+			 }	*/
+			if (c->sockfd > 0) {          			// sanity check (usually always > 0)
+        		FD_SET(c->sockfd, &readset);  		// add to read set
+				if (!TAILQ_EMPTY(&c->msgq)) {		// has data to write
+					FD_SET(c->sockfd, &writeset); 	// add to write set
+				}
+				/* Update max_fd */
+        		if (c->sockfd > max_fd) max_fd = c->sockfd;
 			}
 		}
 
 		struct server *s, *tmp_s;
-		LIST_FOREACH(s, &servers, entries) {
-			FD_SET(s->sockfd, &readset);
-			if (s->sockfd > max_fd) max_fd = s->sockfd;
+		LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
+			if (s->sockfd > 0) {          			// sanity check (usually always > 0)
+				FD_SET(s->sockfd, &readset);  		// add to read set
+				//if (!TAILQ_EMPTY(&s->msgq)) {		// has data to write
+				//	FD_SET(s->sockfd, &writeset); 	// add to write set
+				//}
+				/* Update max_fd */
+				if (s->sockfd > max_fd) max_fd = s->sockfd;
+			}
 		}
 
+		struct staged_connection *staged, *tmp_staged;
+		LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
+			if (staged->sockfd > 0) {          			// sanity check (usually always > 0)
+				FD_SET(staged->sockfd, &readset);  		// add to read set
+				/* Update max_fd */
+				if (staged->sockfd > max_fd) max_fd = staged->sockfd;
+			}
+		}
 
-
-
-		if (select(max_fd+1, &readset, NULL, NULL, NULL) > 0) {
+		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
+		if (sel < 0) {
+			if (errno == EINTR) continue;
+			perror("select");
+			close(sockfd);
+			return EXIT_FAILURE;
+		} else if (sel == 0) {
+			continue; /* shouldn't happen with NULL timeout */
+		} else if (sel > 0) {
 
 			/* Check to see if our listening socket has a pending connection */
 			if (FD_ISSET(sockfd, &readset)) {
@@ -150,41 +206,74 @@ int main(int argc, char **argv)
 					/* FIXME: Add newsockfd to your list of clients -- but no nickname yet */
 					/* We can't immediately read(newsockfd) because we haven't asked
 					* select whether it's ready for reading yet */
-					
-					char typebuf[32] = {0};
-					ssize_t typebytes = read(newsockfd, typebuf, sizeof(typebuf) - 1);
-					if (typebytes <= 0) {
-						fprintf(stderr, "%s:%d Error reading peer type\n", __FILE__, __LINE__);
-						close(newsockfd);
+
+					/* Set non-blocking on this client socket */
+					if (fcntl(newsockfd, F_SETFL, O_NONBLOCK) < 0) {
+						perror("fcntl staged_connection O_NONBLOCK");
+						close (newsockfd);
 						continue;
 					}
-					if (typebytes < sizeof(typebuf)) {
-						typebuf[typebytes] = '\0'; // null-terminate
-					} else {
-						typebuf[sizeof(typebuf) - 1] = '\0'; // ensure null-termination
+
+					struct staged_connection *new_staged = malloc(sizeof(struct staged_connection));
+					if (!new_staged) {
+						fprintf(stderr, "server: out of memory\n");
+						close (newsockfd);
+						continue;
 					}
 
-					if (strncmp(typebuf, "SERVER", 6) == 0) {
+					new_staged->sockfd = newsockfd; 	// set client socket
+					new_staged->addr = cli_addr;		// set client address
+					new_staged->inbuf[0] = '\0';     // initialize input buffer
+					new_staged->inptr = new_staged->inbuf;    // set input pointer to start of
+
+					LIST_INSERT_HEAD(&staged_conns, new_staged, entries);  // insert at the head
+					printf("Added staged connection %d from addr %s\n", new_staged->sockfd, inet_ntoa(new_staged->addr.sin_addr));
+				}
+
+			}
+
+			LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
+
+				int stagedsockfd = staged->sockfd;
+				// if staged connection has something to read
+				if (FD_ISSET(stagedsockfd, &readset)) {
+
+					ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+					if (typebytes <= 0) {
+						fprintf(stderr, "%s:%d Error reading peer type %s\n", __FILE__, __LINE__, staged->inptr);
+						remove_staged_connection(&staged_conns, staged);
+						continue;
+					}
+
+					staged->inptr += typebytes;
+
+					if ((staged->inptr < &(staged->inbuf[MAX]))) continue; // not a full message yet
+
+					staged->inbuf[MAX - 1] = '\0';   // ensure null-termination
+					staged->inptr = staged->inbuf; // reset input pointer for next read
+
+					if (strncmp(staged->inptr, "SERVER", 6) == 0) {
 						// --- Register new chatroom server ---
-						s = malloc(sizeof(struct server));
-						s->sockfd = newsockfd;
-						s->addr = cli_addr;
 
-						char *topic_start = typebuf + 7; // after "SERVER "
+						int count = 0;
+						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) count++;
 
+						if (count >= MAX_SERVERS) {
+							fprintf(stderr, "Maximum servers reached. Rejecting server %s\n", inet_ntoa(cli_addr.sin_addr));
+							remove_staged_connection(&staged_conns, staged);
+							continue;  // skip the rest of this iteration
+						}
 
 						// Check if this username is already taken
 						// Check if first user
 						int taken = 0;
 						struct server *other;
-						LIST_FOREACH(other, &servers, entries) {
-							if (other != s && other->topic[0] != '\0') {
+						LIST_FOREACH_SAFE(other, &servers, server_entries, tmp_s) {
+							if (/*other != s &&*/ other->topic[0] != '\0') {
 									char topic[MAX_USERNAME_LEN] = {0};
-									if(sscanf(typebuf, "SERVER %23s %*d", topic) != 1) {
+									if(sscanf(staged->inptr, "SERVER %*d %23[^\n]", topic) != 1) {
 										fprintf(stderr, "Invalid handshake from chat server\n");
-										write(newsockfd, "Invalid handshake from chat server.\0", 37);
-										close(newsockfd);
-										//free(s);
+										remove_staged_connection(&staged_conns, staged);
 										break;
 									}
 									
@@ -195,25 +284,33 @@ int main(int argc, char **argv)
 							}
 						}
 
-						if (taken || topic_start[0] == '\0') {
+						if (taken /* || topic_start[0] == '\0' */ ) {
 							// Topic taken or invalid
 							char buf[MAX] = {'\0'};
 							snprintf(buf, MAX, "Username unavailable or invalid, try again:");
 							fprintf(stderr, "%s", buf);
-							write(newsockfd, buf, MAX);
-							close(newsockfd);
+							//write(newsockfd, buf, MAX);
+							remove_staged_connection(&staged_conns, staged);
 							continue;
 						}
 
-						// typebuf contains: "SERVER <topic> <port>"
+						// staged->inptr contains: "SERVER <topic> <port>"
 						char topic[MAX_USERNAME_LEN] = {0};
 						int listen_port = 0;
-						if (sscanf(typebuf, "SERVER %23s %d", topic, &listen_port) != 2) {
+						if (sscanf(staged->inptr, "SERVER %d %23[^\n]", &listen_port, topic) != 2) {
 							fprintf(stderr, "Invalid handshake from chat server\n");
-							close(newsockfd);
+							remove_staged_connection(&staged_conns, staged);
 							continue;
 						}
-						strncpy(s->topic, topic, MAX_USERNAME_LEN-1);
+
+
+						s = malloc(sizeof(struct server));
+						s->sockfd = staged->sockfd;
+						s->addr = staged->addr;
+
+						//str ncpy(s->topic, topic, MAX_USERNAME_LEN-1);
+						sscanf(topic, "%23[^\n]", s->topic);
+						
 						s->topic[MAX_USERNAME_LEN-1] = '\0';
 						s->listen_port = listen_port;
 
@@ -222,36 +319,47 @@ int main(int argc, char **argv)
 						//write(newsockfd, buf, MAX);
 						fprintf(stderr, "Server %s has registered. It's listening at %s:%d", s->topic, inet_ntoa(cli_addr.sin_addr), listen_port);
 						fprintf(stderr, " Connected from %s\n", inet_ntoa(cli_addr.sin_addr));
-						LIST_INSERT_HEAD(&servers, s, entries);
+						LIST_INSERT_HEAD(&servers, s, server_entries);
+
+						free(staged);
+						LIST_REMOVE(staged, entries);
 					} 
-					else if (strncmp(typebuf, "CLIENT", 6) == 0) {
+					else if (strncmp(staged->inptr, "CLIENT", 6) == 0) {
 						// --- Register new user client ---
 						int count = 0;
-						LIST_FOREACH(c, &clients, entries) count++;
+						LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) count++;
 
 						if (count >= MAX_CLIENTS) {
 							fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
-							close(newsockfd);
+							remove_staged_connection(&staged_conns, staged);
 							continue;  // skip the rest of this iteration
 						}
 
 						c = malloc(sizeof(struct client));
-						c->sockfd = newsockfd;
-						c->addr = cli_addr;
-						c->nickname[0] = '\0';  // no nickname				
-						LIST_INSERT_HEAD(&clients, c, entries);  // insert at the head
+						c->sockfd = staged->sockfd; 	// set client socket
+						c->addr = staged->addr;		// set client address
+						c->nickname[0] = '\0';  // no nickname		
+						c->redirecting = 0; // not redirecting yet
+						TAILQ_INIT(&c->msgq);	// initialize message queue
+						c->inbuf[0] = '\0';     // initialize input buffer
+						c->inptr = c->inbuf;    // set input pointer to start of
+
+						LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
 						printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
-						broadcast_serverlist(&servers, newsockfd);
+						broadcast_serverlist(&servers, c);
+
+						free(staged);
+						LIST_REMOVE(staged, entries);
 					}
 					else {
 						fprintf(stderr, "Unknown peer type from %s — closing\n", inet_ntoa(cli_addr.sin_addr));
-						close(newsockfd);
+						remove_staged_connection(&staged_conns, staged);
 					}
 				}
-
 			}
 
-			LIST_FOREACH_SAFE(s, &servers, entries, tmp_s) {
+			// Check server sockets for disconnects
+			LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
 				int serversockfd = s->sockfd;
 				// if server has something to read (a disconnect in our case)
 				if (FD_ISSET(serversockfd, &readset)) {
@@ -259,17 +367,24 @@ int main(int argc, char **argv)
 					/* ONLY HANDLING DISCONNECTS */
 					ssize_t nread = read(serversockfd, buf, MAX);
 					printf("Read %zd bytes from server %d\n", nread, serversockfd);
-					if (nread <= 0) {
+					if (nread == 0) {
 						fprintf(stderr, "%s:%d Error reading from server\n", __FILE__, __LINE__);
-						close (serversockfd);
-						LIST_REMOVE(s, entries); // inside LIST_FOREACH_SAFE, so safe to remove
-						free(s);
+						remove_server(&servers, s);
 						continue;
+					}
+					else if (nread < 0) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
+
+						fprintf(stderr, "%s:%d Error reading from server %d: %s\n", __FILE__, __LINE__, serversockfd, strerror(errno));
+
+						remove_server(&servers, s);
+						continue;
+					}
 				}
 			}
 
 			/* TODO: Check ALL your client sockets, e.g., using LIST_FOREACH */
-			LIST_FOREACH_SAFE(c, &clients, entries, tmp_c) {
+			LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) {
 
 				int clisockfd = c->sockfd;
 
@@ -277,73 +392,206 @@ int main(int argc, char **argv)
 				* may become ready */
 				if (FD_ISSET(clisockfd, &readset)) {
 
-					char buf[MAX] = {'\0'};
-					ssize_t nread = read(clisockfd, buf, MAX);
+					ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
 					printf("Read %zd bytes from client %d\n", nread, clisockfd);
-					if (nread <= 0) {
-						fprintf(stderr, "%s:%d Error reading from client\n", __FILE__, __LINE__);
-						close (clisockfd);
-						LIST_REMOVE(c, entries); // inside LIST_FOREACH_SAFE, so safe to remove
-						free(c);
-						continue;
+
+
+					// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
+					// THE FORMULA FOR READING IS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
+					// AT END OF BUFFER. AS OF NOW, &(c->inbuf[MAX]) - c->inptr IS THE CORRECT FORMULA.
+					if (nread == 0) { 
+						/* orderly shutdown by client */
+						remove_client(&clients, c);
+						//continue; /* c is freed - continue with next in loop */
 					}
+					else if (nread < 0) {
 
-					if (nread < MAX) buf[nread] = '\0';  // null-terminate the string
-					else buf[MAX - 1] = '\0'; 			 // ensure null-termination
+						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
 
-			        int server_count = 0;
-			        LIST_FOREACH(s, &servers, entries) server_count++;
-        			int choice = buf[0] - '0';  // convert char '1', '2', ... to int
-					if (choice < 1 || choice > server_count) {
-						// Invalid choice
-						char msg[MAX] = {'\0'};
-						snprintf(msg, MAX, "Invalid server choice. Please try again:\n");
-						write(clisockfd, msg, MAX);
-						broadcast_serverlist(&servers, clisockfd);
-						continue;
-					}
+						fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, strerror(errno));
 
-					// Valid choice, find the server
-					char msg[MAX] = {'\0'};
-					//snprintf(msg, MAX, "Connecting you to server %d...\n", choice);
-					//write(clisockfd, msg, MAX);
+						remove_client(&clients, c);
+						//continue;
+					} else /* if (nread > 0) */ {
 
-					struct server *selected = NULL;
+						c->inptr += nread; // advance input pointer
+						if ((c->inptr < &(c->inbuf[MAX]))) continue; // not full message yet
 
-					int idx = 1;
-					LIST_FOREACH(s, &servers, entries) {
-						if (idx == choice) {
-							selected = s;
-							break;
+						c->inbuf[MAX - 1] = '\0';   // ensure null-termination
+						c->inptr = c->inbuf; // reset input pointer for next read
+
+						int server_count = 0;
+						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) server_count++;
+						int choice = c->inbuf[0] - '0';  // convert char '1', '2', ... to int
+						if (choice < 1 || choice > server_count) {
+							// Invalid choice
+							char msg[MAX] = {'\0'};
+							snprintf(msg, MAX, "Invalid server choice. Please try again:\n");
+							queue_message(c, msg);
+							//write(clisockfd, msg, MAX);
+							broadcast_serverlist(&servers, c);
+							continue;
 						}
-						idx++;
+
+						// Valid choice, find the server
+						char msg[MAX] = {'\0'};
+						//snprintf(msg, MAX, "Connecting you to server %d...\n", choice);
+						//write(clisockfd, msg, MAX);
+
+						struct server *selected = NULL;
+
+						int idx = 1;
+						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
+							if (idx == choice) {
+								selected = s;
+								break;
+							}
+							idx++;
+						}
+						if (!selected) {
+							fprintf(stderr, "Error: chosen server not found (should never happen)\n");
+							continue;
+						}
+						
+						char ip[INET_ADDRSTRLEN];
+						inet_ntop(AF_INET, &(selected->addr.sin_addr), ip, INET_ADDRSTRLEN);
+						int port = selected->listen_port;
+
+						fprintf(stderr, "Client %d chose server %d. (%s:%d)\n", clisockfd, choice, ip, port);
+
+
+						snprintf(msg, MAX, "SERVER_INFO %s %d\n", ip, port);
+						
+						c->redirecting = 1;
+						queue_message(c, msg);
+						//write(clisockfd, msg, MAX);
+
+						//remove_client(&clients, c);
+
+						fprintf(stderr, "Disconnected client %d after sending server info\n", clisockfd);
+						continue;	
 					}
-					if (!selected) {
-						fprintf(stderr, "Error: chosen server not found (should never happen)\n");
-						continue;
-					}
-					
-					char ip[INET_ADDRSTRLEN];
-					inet_ntop(AF_INET, &(selected->addr.sin_addr), ip, INET_ADDRSTRLEN);
-					int port = selected->listen_port;
-
-					fprintf(stderr, "Client %d chose server %d. (%s:%d)\n", clisockfd, choice, ip, port);
-
-
-					snprintf(msg, MAX, "SERVER_INFO %s %d\n", ip, port);
-					write(clisockfd, msg, MAX);
-
-					close (clisockfd);
-					LIST_REMOVE(c, entries); // inside LIST_FOREACH_SAFE, so safe to remove
-					free(c);
-					fprintf(stderr, "Disconnected client %d after sending server info\n", clisockfd);
-					continue;	
 				}
-			}
+
+				/* Handle writable client sockets */
+				if (FD_ISSET(clisockfd, &writeset)) {
+					struct outmsg *m = TAILQ_FIRST(&c->msgq);
+					if (!m) continue; // no messages queued
+
+					size_t remaining = m->len - m->sent;
+
+					ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
+					if (nwrite > 0) {
+						m->sent += nwrite;
+						if (m->sent == m->len) {
+							TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
+							free(m->data);
+							free(m);
+
+							if (c->redirecting && TAILQ_EMPTY(&c->msgq)) {
+								// Client has been sent the server info, disconnect them
+								remove_client(&clients, c);
+							}
+						}
+					} else if (nwrite < 0) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							// try later
+						} else {
+							fprintf(stderr, "Error writing to client %d: %s\n", clisockfd, strerror(errno));
+							remove_client(&clients, c);
+							continue;
+						}
+					}
+				} 
+
+
+			} /*     LIST_FOREACH_SAFE */
 		}
+	} /*                  for (;;) */
+}
+
+
+void broadcast_serverlist(struct serverlist *servers, struct client *c) {
+	struct server *s, *tmp_s;
+	char listbuf[MAX];
+	listbuf[0] = '\0';
+	int idx = 1;
+	LIST_FOREACH_SAFE(s, servers, server_entries, tmp_s) {
+		char line[MAX];
+		snprintf(line, sizeof(line), "%d. %s\n", idx++, s->topic);
+		strncat(listbuf, line, MAX - strnlen(listbuf, MAX) - 1);
+	}
+
+	if (idx == 1) {
+		snprintf(listbuf, sizeof(listbuf), "No servers available.\n");
+	}
+
+	//write(client_sockfd, listbuf, strnlen(listbuf, MAX)); // send the list
+	queue_message(c, listbuf);
+	
+}
+
+static void queue_message(struct client *c, const char *msg) {
+	size_t mlen = strnlen(msg, MAX);
+    if (mlen == 0) return;
+
+    struct outmsg *m = malloc(sizeof(*m));
+    if (!m) {
+		fprintf(stderr, "can't malloc new outmsg struct, server: out of memory\n");
+		return;
+	}
+
+	m->data = malloc(mlen + 1);
+    if (!m->data) {
+		fprintf(stderr, "can't malloc new outmsg data, server: out of memory\n");
+        free(m);
+        return;
+    }
+
+	//memcpy(m->data, msg, mlen);
+    //m->data[mlen] = '\0';
+	snprintf(m->data, mlen + 1, "%s", msg); // ensure null-termination
+
+    m->len = mlen;
+    m->sent = 0;
+
+	TAILQ_INSERT_TAIL(&c->msgq, m, entries);
+}
+
+
+static void remove_client(struct clientlist *clients, struct client *c) {
+    if (clients && c) {
+		printf("Removing client %d (%s)\n", c->sockfd, c->nickname);
+
+		struct outmsg *m, *tmp;
+		TAILQ_FOREACH_SAFE(m, &c->msgq, entries, tmp) {
+			TAILQ_REMOVE(&c->msgq, m, entries);
+			free(m->data);
+			free(m);
 		}
-		else {
-			/* Handle select errors */
-		}
+
+		close(c->sockfd);
+		LIST_REMOVE(c, client_entries);
+		free(c);
+	}
+}
+
+static void remove_server(struct serverlist *servers, struct server *s) {
+	if (servers && s) {
+		printf("Removing server %d (%s)\n", s->sockfd, s->topic);
+
+		close(s->sockfd);
+		LIST_REMOVE(s, server_entries);
+		free(s);
+	}
+}
+
+static void remove_staged_connection(struct staged_connection_list *staged_conns, struct staged_connection *staged) {
+	if (staged_conns && staged) {
+		printf("Removing staged connection %d\n", staged->sockfd);
+
+		close(staged->sockfd);
+		LIST_REMOVE(staged, entries);
+		free(staged);
 	}
 }
