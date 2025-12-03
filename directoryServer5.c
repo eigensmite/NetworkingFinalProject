@@ -172,7 +172,7 @@ int main(int argc, char **argv)
 
 		// Add listening socket to read set
 		//FD_SET(sockfd, &readset);
-		gnutls_transport_set_int(session, sockfd);
+		//gnutls_transport_set_int(session, sockfd);
 		int max_fd = sockfd;
 
 		/* FIXME: Populate readset with ALL your client sockets here,
