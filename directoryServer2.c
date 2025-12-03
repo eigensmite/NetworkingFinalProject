@@ -168,6 +168,8 @@ int main(int argc, char **argv)
 		FD_ZERO(&readset);
 		FD_ZERO(&writeset);
 
+		int ret = 0;
+
 		// Add listening socket to read set
 		//FD_SET(sockfd, &readset);
 		gnutls_transport_set_int(session, sockfd);
@@ -257,14 +259,31 @@ int main(int argc, char **argv)
 					}
 
 					gnutls_session_t session;
+
+					/* Code from GnuTLS documentation */
 					gnutls_init(&session, GNUTLS_SERVER);
 					gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE,
 									x509_cred);
-
 					gnutls_certificate_server_set_request(session,
 										GNUTLS_CERT_IGNORE);
 					gnutls_handshake_set_timeout(session,
 									GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+
+					gnutls_transport_set_int(session, newsockfd);
+
+					LOOP_CHECK(ret, gnutls_handshake(session));
+					/* FIXME */
+					/* THIS CODE IS FROM DOCUMENTATION - we must handle it for our application*/
+					if (ret < 0) {
+						close(newsockfd);
+						gnutls_deinit(session);
+						fprintf(stderr, "*** Handshake has failed (%s)\n\n",
+							gnutls_strerror(ret));
+						continue;
+					}
+					printf("- Handshake was completed\n");
+
+					/* End code from GnuTLS documentation */
 					
 					new_staged->session = session;
 					new_staged->sockfd = newsockfd; 	// set client socket
@@ -285,14 +304,17 @@ int main(int argc, char **argv)
 				if (FD_ISSET(serversockfd, &readset)) {
 					char buf[MAX] = {'\0'};
 					/* ONLY HANDLING DISCONNECTS */
-					ssize_t nread = read(serversockfd, buf, MAX);
-					printf("Read %zd bytes from server %d\n", nread, serversockfd);
-					if (nread == 0) {
+					//ssize_t nread = read(serversockfd, buf, MAX);
+					LOOP_CHECK(ret, gnutls_record_recv(s->session, buf,
+							   MAX));
+
+					printf("Read %zd bytes from server %d\n", ret, serversockfd);
+					if (ret == 0) {
 						fprintf(stderr, "%s:%d Error reading from server\n", __FILE__, __LINE__);
 						remove_server(&servers, s);
 						continue;
 					}
-					else if (nread < 0) {
+					else if (ret < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
 
 						fprintf(stderr, "%s:%d Error reading from server %d: %s\n", __FILE__, __LINE__, serversockfd, strerror(errno));
@@ -312,19 +334,22 @@ int main(int argc, char **argv)
 				* may become ready */
 				if (FD_ISSET(clisockfd, &readset)) {
 
-					ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					printf("Read %zd bytes from client %d\n", nread, clisockfd);
+					//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+					LOOP_CHECK(ret, gnutls_record_recv(s->session, c->inptr,
+							   &(c->inbuf[MAX]) - c->inptr));
+
+					printf("Read %zd bytes from client %d\n", ret, clisockfd);
 
 
 					// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
 					// THE FORMULA FOR READING IS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
 					// AT END OF BUFFER. AS OF NOW, &(c->inbuf[MAX]) - c->inptr IS THE CORRECT FORMULA.
-					if (nread == 0) { 
+					if (ret == 0) { 
 						/* orderly shutdown by client */
 						remove_client(&clients, c);
 						//continue; /* c is freed - continue with next in loop */
 					}
-					else if (nread < 0) {
+					else if (ret < 0) {
 
 						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
 
@@ -334,7 +359,7 @@ int main(int argc, char **argv)
 						//continue;
 					} else /* if (nread > 0) */ {
 
-						c->inptr += nread; // advance input pointer
+						c->inptr += ret; // advance input pointer
 						if ((c->inptr < &(c->inbuf[MAX]))) continue; // not full message yet
 
 						c->inbuf[MAX - 1] = '\0';   // ensure null-termination
@@ -400,9 +425,12 @@ int main(int argc, char **argv)
 
 					size_t remaining = m->len - m->sent;
 
-					ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
-					if (nwrite > 0) {
-						m->sent += nwrite;
+					//ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
+					
+					CHECK(gnutls_record_send(c->session, m->data + m->sent, ret));
+
+					if (ret > 0) {
+						m->sent += ret;
 						if (m->sent == m->len) {
 							TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
 							free(m->data);
@@ -413,7 +441,7 @@ int main(int argc, char **argv)
 								remove_client(&clients, c);
 							}
 						}
-					} else if (nwrite < 0) {
+					} else if (ret < 0) {
 						if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							// try later
 						} else {
@@ -434,14 +462,16 @@ int main(int argc, char **argv)
 				// if staged connection has something to read
 				if (FD_ISSET(stagedsockfd, &readset)) {
 
-					ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					if (typebytes <= 0) {
+					//ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+					LOOP_CHECK(ret, gnutls_record_recv(staged->session, staged->inptr,
+							   &(staged->inbuf[MAX]) - staged->inptr));
+					if (ret <= 0) {
 						fprintf(stderr, "%s:%d Error reading peer type %s\n", __FILE__, __LINE__, staged->inptr);
 						remove_staged_connection(&staged_conns, staged);
 						continue;
 					}
 
-					staged->inptr += typebytes;
+					staged->inptr += ret;
 
 					if ((staged->inptr < &(staged->inbuf[MAX]))) continue; // not a full message yet
 
@@ -503,6 +533,7 @@ int main(int argc, char **argv)
 						s = malloc(sizeof(struct server));
 						s->sockfd = staged->sockfd;
 						s->addr = staged->addr;
+						s->session = staged->session;
 
 						//str ncpy(s->topic, topic, MAX_USERNAME_LEN-1);
 						sscanf(topic, "%23[^\n]", s->topic);
@@ -534,6 +565,7 @@ int main(int argc, char **argv)
 						c = malloc(sizeof(struct client));
 						c->sockfd = staged->sockfd; 	// set client socket
 						c->addr = staged->addr;		// set client address
+						c->session = staged->session;
 						c->nickname[0] = '\0';  // no nickname		
 						c->redirecting = 0; // not redirecting yet
 						TAILQ_INIT(&c->msgq);	// initialize message queue
