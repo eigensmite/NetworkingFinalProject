@@ -232,132 +232,6 @@ int main(int argc, char **argv)
 
 			}
 
-			LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
-
-				int stagedsockfd = staged->sockfd;
-				// if staged connection has something to read
-				if (FD_ISSET(stagedsockfd, &readset)) {
-
-					ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					if (typebytes <= 0) {
-						fprintf(stderr, "%s:%d Error reading peer type %s\n", __FILE__, __LINE__, staged->inptr);
-						remove_staged_connection(&staged_conns, staged);
-						continue;
-					}
-
-					staged->inptr += typebytes;
-
-					if ((staged->inptr < &(staged->inbuf[MAX]))) continue; // not a full message yet
-
-					staged->inbuf[MAX - 1] = '\0';   // ensure null-termination
-					staged->inptr = staged->inbuf; // reset input pointer for next read
-
-					if (strncmp(staged->inptr, "SERVER", 6) == 0) {
-						// --- Register new chatroom server ---
-
-						int count = 0;
-						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) count++;
-
-						if (count >= MAX_SERVERS) {
-							fprintf(stderr, "Maximum servers reached. Rejecting server %s\n", inet_ntoa(cli_addr.sin_addr));
-							remove_staged_connection(&staged_conns, staged);
-							continue;  // skip the rest of this iteration
-						}
-
-						// Check if this username is already taken
-						// Check if first user
-						int taken = 0;
-						struct server *other;
-						LIST_FOREACH_SAFE(other, &servers, server_entries, tmp_s) {
-							if (/*other != s &&*/ other->topic[0] != '\0') {
-									char topic[MAX_USERNAME_LEN] = {0};
-									if(sscanf(staged->inptr, "SERVER %*d %23[^\n]", topic) != 1) {
-										fprintf(stderr, "Invalid handshake from chat server\n");
-										remove_staged_connection(&staged_conns, staged);
-										break;
-									}
-									
-								if (strncmp(other->topic, topic, MAX_USERNAME_LEN - 1) == 0) {
-									taken = 1;
-									break;
-								}
-							}
-						}
-
-						if (taken /* || topic_start[0] == '\0' */ ) {
-							// Topic taken or invalid
-							char buf[MAX] = {'\0'};
-							snprintf(buf, MAX, "Username unavailable or invalid, try again:");
-							fprintf(stderr, "%s", buf);
-							//write(newsockfd, buf, MAX);
-							remove_staged_connection(&staged_conns, staged);
-							continue;
-						}
-
-						// staged->inptr contains: "SERVER <topic> <port>"
-						char topic[MAX_USERNAME_LEN] = {0};
-						int listen_port = 0;
-						if (sscanf(staged->inptr, "SERVER %d %23[^\n]", &listen_port, topic) != 2) {
-							fprintf(stderr, "Invalid handshake from chat server\n");
-							remove_staged_connection(&staged_conns, staged);
-							continue;
-						}
-
-
-						s = malloc(sizeof(struct server));
-						s->sockfd = staged->sockfd;
-						s->addr = staged->addr;
-
-						//str ncpy(s->topic, topic, MAX_USERNAME_LEN-1);
-						sscanf(topic, "%23[^\n]", s->topic);
-						
-						s->topic[MAX_USERNAME_LEN-1] = '\0';
-						s->listen_port = listen_port;
-
-						//char buf[MAX] = {'\0'};
-						//snprintf(buf, MAX, "Welcome, chatroom server for topic '%s'!", s->topic);
-						//write(newsockfd, buf, MAX);
-						fprintf(stderr, "Server %s has registered. It's listening at %s:%d", s->topic, inet_ntoa(cli_addr.sin_addr), listen_port);
-						fprintf(stderr, " Connected from %s\n", inet_ntoa(cli_addr.sin_addr));
-						LIST_INSERT_HEAD(&servers, s, server_entries);
-
-						free(staged);
-						LIST_REMOVE(staged, entries);
-					} 
-					else if (strncmp(staged->inptr, "CLIENT", 6) == 0) {
-						// --- Register new user client ---
-						int count = 0;
-						LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) count++;
-
-						if (count >= MAX_CLIENTS) {
-							fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
-							remove_staged_connection(&staged_conns, staged);
-							continue;  // skip the rest of this iteration
-						}
-
-						c = malloc(sizeof(struct client));
-						c->sockfd = staged->sockfd; 	// set client socket
-						c->addr = staged->addr;		// set client address
-						c->nickname[0] = '\0';  // no nickname		
-						c->redirecting = 0; // not redirecting yet
-						TAILQ_INIT(&c->msgq);	// initialize message queue
-						c->inbuf[0] = '\0';     // initialize input buffer
-						c->inptr = c->inbuf;    // set input pointer to start of
-
-						LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
-						printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
-						broadcast_serverlist(&servers, c);
-
-						free(staged);
-						LIST_REMOVE(staged, entries);
-					}
-					else {
-						fprintf(stderr, "Unknown peer type from %s — closing\n", inet_ntoa(cli_addr.sin_addr));
-						remove_staged_connection(&staged_conns, staged);
-					}
-				}
-			}
-
 			// Check server sockets for disconnects
 			LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
 				int serversockfd = s->sockfd;
@@ -506,6 +380,133 @@ int main(int argc, char **argv)
 
 
 			} /*     LIST_FOREACH_SAFE */
+
+
+			LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
+
+				int stagedsockfd = staged->sockfd;
+				// if staged connection has something to read
+				if (FD_ISSET(stagedsockfd, &readset)) {
+
+					ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+					if (typebytes <= 0) {
+						fprintf(stderr, "%s:%d Error reading peer type %s\n", __FILE__, __LINE__, staged->inptr);
+						remove_staged_connection(&staged_conns, staged);
+						continue;
+					}
+
+					staged->inptr += typebytes;
+
+					if ((staged->inptr < &(staged->inbuf[MAX]))) continue; // not a full message yet
+
+					staged->inbuf[MAX - 1] = '\0';   // ensure null-termination
+					staged->inptr = staged->inbuf; // reset input pointer for next read
+
+					if (strncmp(staged->inptr, "SERVER", 6) == 0) {
+						// --- Register new chatroom server ---
+
+						int count = 0;
+						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) count++;
+
+						if (count >= MAX_SERVERS) {
+							fprintf(stderr, "Maximum servers reached. Rejecting server %s\n", inet_ntoa(cli_addr.sin_addr));
+							remove_staged_connection(&staged_conns, staged);
+							continue;  // skip the rest of this iteration
+						}
+
+						// Check if this username is already taken
+						// Check if first user
+						int taken = 0;
+						struct server *other;
+						LIST_FOREACH_SAFE(other, &servers, server_entries, tmp_s) {
+							if (/*other != s &&*/ other->topic[0] != '\0') {
+									char topic[MAX_USERNAME_LEN] = {0};
+									if(sscanf(staged->inptr, "SERVER %*d %23[^\n]", topic) != 1) {
+										fprintf(stderr, "Invalid handshake from chat server\n");
+										remove_staged_connection(&staged_conns, staged);
+										break;
+									}
+									
+								if (strncmp(other->topic, topic, MAX_USERNAME_LEN - 1) == 0) {
+									taken = 1;
+									break;
+								}
+							}
+						}
+
+						if (taken /* || topic_start[0] == '\0' */ ) {
+							// Topic taken or invalid
+							char buf[MAX] = {'\0'};
+							snprintf(buf, MAX, "Username unavailable or invalid, try again:");
+							fprintf(stderr, "%s", buf);
+							//write(newsockfd, buf, MAX);
+							remove_staged_connection(&staged_conns, staged);
+							continue;
+						}
+
+						// staged->inptr contains: "SERVER <topic> <port>"
+						char topic[MAX_USERNAME_LEN] = {0};
+						int listen_port = 0;
+						if (sscanf(staged->inptr, "SERVER %d %23[^\n]", &listen_port, topic) != 2) {
+							fprintf(stderr, "Invalid handshake from chat server\n");
+							remove_staged_connection(&staged_conns, staged);
+							continue;
+						}
+
+
+						s = malloc(sizeof(struct server));
+						s->sockfd = staged->sockfd;
+						s->addr = staged->addr;
+
+						//str ncpy(s->topic, topic, MAX_USERNAME_LEN-1);
+						sscanf(topic, "%23[^\n]", s->topic);
+						
+						s->topic[MAX_USERNAME_LEN-1] = '\0';
+						s->listen_port = listen_port;
+
+						//char buf[MAX] = {'\0'};
+						//snprintf(buf, MAX, "Welcome, chatroom server for topic '%s'!", s->topic);
+						//write(newsockfd, buf, MAX);
+						fprintf(stderr, "Server %s has registered. It's listening at %s:%d", s->topic, inet_ntoa(cli_addr.sin_addr), listen_port);
+						fprintf(stderr, " Connected from %s\n", inet_ntoa(cli_addr.sin_addr));
+						LIST_INSERT_HEAD(&servers, s, server_entries);
+
+						free(staged);
+						LIST_REMOVE(staged, entries);
+					} 
+					else if (strncmp(staged->inptr, "CLIENT", 6) == 0) {
+						// --- Register new user client ---
+						int count = 0;
+						LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) count++;
+
+						if (count >= MAX_CLIENTS) {
+							fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
+							remove_staged_connection(&staged_conns, staged);
+							continue;  // skip the rest of this iteration
+						}
+
+						c = malloc(sizeof(struct client));
+						c->sockfd = staged->sockfd; 	// set client socket
+						c->addr = staged->addr;		// set client address
+						c->nickname[0] = '\0';  // no nickname		
+						c->redirecting = 0; // not redirecting yet
+						TAILQ_INIT(&c->msgq);	// initialize message queue
+						c->inbuf[0] = '\0';     // initialize input buffer
+						c->inptr = c->inbuf;    // set input pointer to start of
+
+						LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
+						printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
+						broadcast_serverlist(&servers, c);
+
+						free(staged);
+						LIST_REMOVE(staged, entries);
+					}
+					else {
+						fprintf(stderr, "Unknown peer type from %s — closing\n", inet_ntoa(cli_addr.sin_addr));
+						remove_staged_connection(&staged_conns, staged);
+					}
+				}
+			} /*     LIST_FOREACH_SAFE staged connections */
 		}
 	} /*                  for (;;) */
 }
