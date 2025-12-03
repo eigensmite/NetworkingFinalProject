@@ -8,6 +8,10 @@
 #include "inet.h"
 #include "common.h"
 
+#include <gnutls/gnutls.h>
+#include <gnutls/x509.h>
+#include <gnutls/abstract.h>
+
 int connect_to_server(const char *ip, int port) {
     int sockfd;
     struct sockaddr_in serv_addr;

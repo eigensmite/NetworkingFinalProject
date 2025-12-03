@@ -9,6 +9,10 @@
 #include "inet.h"
 #include "common.h"
 
+#include <gnutls/gnutls.h>
+#include <gnutls/x509.h>
+#include <gnutls/abstract.h>
+
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
          (var) && ((tvar) = LIST_NEXT((var), field), 1); \
