@@ -8,10 +8,25 @@
 #include <sys/queue.h> // for BSD linked list macros
 #include "inet.h"
 #include "common.h"
+#include <assert.h>
 
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <gnutls/abstract.h>
+
+#define KEYFILE "certs/directorykey.pem"
+#define CERTFILE "certs/directorycert.pem"
+#define CAFILE "certs/ca-certificates.crt"
+
+/* Code from GnuTLS documentation */
+
+#define CHECK(x) assert((x) >= 0)
+#define LOOP_CHECK(rval, cmd) \
+	do {                  \
+		rval = cmd;   \
+	} while (rval == GNUTLS_E_AGAIN || rval == GNUTLS_E_INTERRUPTED)
+
+/* End code from GnuTLS documentation */
 
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
@@ -47,6 +62,7 @@ struct outmsg {
 };
 
 struct staged_connection {
+	gnutls_session_t session;
 	int sockfd;                     	// client socket
 	struct sockaddr_in addr;        	// client address
 	char inbuf[MAX];			  		// input buffer
@@ -55,6 +71,7 @@ struct staged_connection {
 };
 
 struct client {
+	gnutls_session_t session;
     int sockfd;                     	// client socket
     struct sockaddr_in addr;        	// client address
 	char nickname[MAX_USERNAME_LEN];	// client nickname
@@ -66,6 +83,7 @@ struct client {
 };
 
 struct server {
+	gnutls_session_t session;
     int sockfd;                     	// server socket
     struct sockaddr_in addr;        	// server address
 	int listen_port;			    	// server listening port
@@ -89,6 +107,18 @@ static void queue_message(struct client *c, const char *msg);
 
 int main(int argc, char **argv)
 {
+	/* init GnuTLS*/
+
+	gnutls_certificate_credentials_t x509_cred;
+	gnutls_session_t session;
+
+	gnutls_global_init();
+	gnutls_certificate_allocate_credentials(&x509_cred);
+	gnutls_certificate_set_x509_trust_file(x509_cred, CAFILE,
+						     GNUTLS_X509_FMT_PEM);
+	gnutls_certificate_set_x509_key_file(x509_cred, CERTFILE, KEYFILE,
+						   GNUTLS_X509_FMT_PEM);
+
 	struct clientlist clients;          // the head of the client list
 	struct serverlist servers;          // the head of the server list
 	struct staged_connection_list staged_conns; // the head of the staged connections list
@@ -131,8 +161,7 @@ int main(int argc, char **argv)
 	listen(sockfd, MAX_CLIENTS + MAX_SERVERS);
 	//#endregion setup_listen_socket
 
-	for (;;) {
-		
+	for (;;) {	
 		fd_set readset, writeset;
 
 		/* Initialize and populate your readset and compute maxfd */
@@ -140,7 +169,8 @@ int main(int argc, char **argv)
 		FD_ZERO(&writeset);
 
 		// Add listening socket to read set
-		FD_SET(sockfd, &readset);
+		//FD_SET(sockfd, &readset);
+		gnutls_transport_set_int(session, sockfd);
 		int max_fd = sockfd;
 
 		/* FIXME: Populate readset with ALL your client sockets here,
@@ -200,6 +230,7 @@ int main(int argc, char **argv)
 				/* Accept a new connection request */
 				socklen_t clilen = sizeof(cli_addr);
 				int newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+
 				if (newsockfd < 0) {
 					perror("server: accept error");
 					close (newsockfd);
@@ -225,6 +256,17 @@ int main(int argc, char **argv)
 						continue;
 					}
 
+					gnutls_session_t session;
+					gnutls_init(&session, GNUTLS_SERVER);
+					gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE,
+									x509_cred);
+
+					gnutls_certificate_server_set_request(session,
+										GNUTLS_CERT_IGNORE);
+					gnutls_handshake_set_timeout(session,
+									GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+					
+					new_staged->session = session;
 					new_staged->sockfd = newsockfd; 	// set client socket
 					new_staged->addr = cli_addr;		// set client address
 					new_staged->inbuf[0] = '\0';     // initialize input buffer
