@@ -1,8 +1,8 @@
 #
-# Makefile for chat server
+# Makefile for TLS-enabled chat client, server, and directory server
 #
 CC	= gcc
-EXECUTABLES=chatClient2 chatServer2 directoryServer2
+EXECUTABLES=chatClient5 chatServer5 directoryServer5
 INCLUDES	= $(wildcard *.h)
 SOURCES	= $(wildcard *.c)
 DEPS		= $(INCLUDES)
@@ -26,19 +26,24 @@ CFLAGS	+= -ggdb3
 					-Wformat-truncation=2 -Wstringop-truncation \
 					-Wformat-overflow=2 -Wformat-signedness
 
-all:	chat2
+# Uncomment the LIBS line below containing the library that you're using
+LIBS	= -lcrypto -lgnutls
+#LIBS	= -lcrypto -lssl
 
-chat2:	$(EXECUTABLES)
+all:	tls
+
+tls:	$(EXECUTABLES)
 
 
-chatClient2: chatClient5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+chatClient5: chatClient5.c $(DEPS)
+	$(CC) $(LDFLAGS) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $< $(LIBS)
 
-chatServer2: chatServer5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+chatServer5: chatServer5.c $(DEPS)
+	$(CC) $(LDFLAGS) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $< $(LIBS)
 
-directoryServer2: directoryServer5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+directoryServer5: directoryServer5.c $(DEPS)
+	$(CC) $(LDFLAGS) $(CFLAGS) $(INCLUDES) $(LDFLAGS) -o $@ $< $(LIBS)
+
 
 # Clean up the mess we made
 .PHONY: clean
