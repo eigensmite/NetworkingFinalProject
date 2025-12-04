@@ -98,7 +98,7 @@ int main()
         close(dir_sock);
         return EXIT_FAILURE;
     }
-    printf("Sent CLIENT handshake to directory server\n");
+    printf("Sent CLIENT handshake to directory server\n\n");
 
     fd_set readset;
     int sockfd = -1;
@@ -110,6 +110,7 @@ int main()
 	while (1) {
         /* Wait for response from directory server */
         FD_ZERO(&readset);
+        FD_SET(STDIN_FILENO, &readset);
         FD_SET(dir_sock, &readset);
 
         int n = select(dir_sock + 1, &readset, NULL, NULL, NULL);
@@ -117,6 +118,40 @@ int main()
             fprintf(stderr, "Select error\n");
             close(dir_sock);
             return EXIT_FAILURE;
+        }
+
+        if (FD_ISSET(STDIN_FILENO, &readset)) {
+                            /* Read user input */
+                if (fgets(buf, MAX, stdin)) {
+                    
+                    if (strnlen(buf, MAX) > 0 && buf[strnlen(buf, MAX) - 1] == '\n') {
+                        buf[strnlen(buf, MAX) - 1] = '\0'; // Remove newline
+                    }
+
+                    //write(dir_sock, buf, MAX);
+
+                    int ret = gnutls_record_send(dir_session, buf, MAX);
+                    if (ret < 0) {
+                        if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+                            fprintf(stderr, "TLS send would block, try again\n");
+                        } else {
+                            fprintf(stderr, "TLS send failed: %s\n", gnutls_strerror(ret));
+                            close(sockfd);
+                            return EXIT_FAILURE;
+                        }
+                    } else {
+                        //fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
+                    }
+
+
+                } else {
+					fprintf(stderr, "Error reading user input\n");
+					close(dir_sock);
+					return EXIT_FAILURE;
+				}
+                fprintf(stderr, "> "); // Prompt for input
+                fflush(stderr);
+
         }
 
         if (FD_ISSET(dir_sock, &readset)) {
@@ -130,7 +165,7 @@ int main()
 
 
             int ret = gnutls_record_recv(dir_session, buf, MAX);
-            printf("Read returned %d\n", ret);
+            //printf("Read returned %d: %s\n", ret, buf);
             if (ret == 0) {
                 fprintf(stderr, "TLS connection closed by directory server\n");
                 gnutls_bye(dir_session, GNUTLS_SHUT_RDWR); 
@@ -184,6 +219,8 @@ int main()
                 break; // Proceed to username input
             } else {
                 /* Directory server sent a list or rejection, display to user */
+                
+                fprintf(stderr, "\r\033[K");
                 fprintf(stderr, "%s\n", buf);
 
 				if (strncmp(buf, "No servers available.", 21) == 0) {
@@ -191,37 +228,16 @@ int main()
 					close(dir_sock);
 					return EXIT_FAILURE;
 				}
+
+                //fprintf(stderr, "%s\n", buf);
+
+                //fprintf(stderr, "> ");
+                //fflush(stderr);
+
+
                 fprintf(stderr, "Select a server number: ");
                 fflush(stderr);
 
-                /* Read user input */
-                if (fgets(buf, MAX, stdin)) {
-                    
-                    if (strnlen(buf, MAX) > 0 && buf[strnlen(buf, MAX) - 1] == '\n') {
-                        buf[strnlen(buf, MAX) - 1] = '\0'; // Remove newline
-                    }
-
-                    //write(dir_sock, buf, MAX);
-
-                    ret = gnutls_record_send(dir_session, buf, MAX);
-                    if (ret < 0) {
-                        if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
-                            fprintf(stderr, "TLS send would block, try again\n");
-                        } else {
-                            fprintf(stderr, "TLS send failed: %s\n", gnutls_strerror(ret));
-                            close(sockfd);
-                            return EXIT_FAILURE;
-                        }
-                    } else {
-                        //fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
-                    }
-
-
-                } else {
-					fprintf(stderr, "Error reading user input\n");
-					close(dir_sock);
-					return EXIT_FAILURE;
-				}
             }
         }
     }
