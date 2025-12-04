@@ -112,7 +112,7 @@ static void remove_client(struct clientlist *clients, struct client *c);
 static void remove_staged_connection(struct staged_connection_list *staged_conns, struct staged_connection *staged);
 static void remove_server(struct serverlist *servers, struct server *s);
 static void queue_message(struct client *c, const char *msg);
-static void queue_server_disconnect_message(struct server *s, const char *msg);
+//static void queue_server_disconnect_message(struct server *s, const char *msg); FUNCTIONAL, BUT NOT USED
 static void queue_staged_disconnect_message(struct staged_connection *staged, const char *msg);
 
 int main(int argc, char **argv)
@@ -848,6 +848,7 @@ static void queue_message(struct client *c, const char *msg) {
 	TAILQ_INSERT_TAIL(&c->msgq, m, entries);
 }
 
+/*
 static void queue_server_disconnect_message(struct server *s, const char *msg) {
 	printf("Queuing disconnect message for server socket %d: %s\n", s->sockfd, msg);
 
@@ -875,6 +876,7 @@ static void queue_server_disconnect_message(struct server *s, const char *msg) {
 
 	s->outptr = s->outbuf; // point to start of message
 }
+*/
 
 static void queue_staged_disconnect_message(struct staged_connection *staged, const char *msg) {
 	printf("Queuing disconnect message for staged socket %d: %s\n", staged->sockfd, msg);
