@@ -108,13 +108,13 @@ int main(int argc, char **argv)
 	gnutls_certificate_allocate_credentials(&x509_cred);
 	gnutls_certificate_set_x509_trust_file(x509_cred, CAFILE, GNUTLS_X509_FMT_PEM);
 	//Set which chat server we are creating
-	if(strncmp(server_name, "Beocat", MAX_USERNAME_LEN) == 0) {
+	if(strncmp(server_name, "BeoCat", MAX_USERNAME_LEN) == 0) {
 		gnutls_certificate_set_x509_key_file(x509_cred, BEOCATCERT, BEOCATKEY, GNUTLS_X509_FMT_PEM);
-	} else if(strncmp(server_name, "Football", MAX_USERNAME_LEN) == 0) {
+	} else if(strncmp(server_name, "KSU Football", MAX_USERNAME_LEN) == 0) {
 		gnutls_certificate_set_x509_key_file(x509_cred, FOOTBALLCERT, FOOTBALLKEY, GNUTLS_X509_FMT_PEM);
 	} else if(strncmp(server_name, "Friendsgiving", MAX_USERNAME_LEN) == 0) {
 		gnutls_certificate_set_x509_key_file(x509_cred, FRIENDSGIVINGCERT, FRIENDSGIVINGKEY, GNUTLS_X509_FMT_PEM);
-	} else if(strncmp(server_name, "Lounge", MAX_USERNAME_LEN) == 0) {
+	} else if(strncmp(server_name, "KSU CS Lounge", MAX_USERNAME_LEN) == 0) {
 		gnutls_certificate_set_x509_key_file(x509_cred, LOUNGECERT, LOUNGEKEY, GNUTLS_X509_FMT_PEM);
 	}
 
@@ -219,7 +219,7 @@ int main(int argc, char **argv)
 			// (only possible if disconnected)
 			fprintf(stderr, "Disconnected. Check dir server to see cause\n");
 			fprintf(stderr, "1) non-unique topic,\n");
-			fprintf(stderr, "2) disallowed name (allowed is Beocat, Football, Friendsgiving, Lounge),\n");
+			fprintf(stderr, "2) disallowed name\n\t(allowed is BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
 			fprintf(stderr, "3) maximum servers reached, or\n");
 			fprintf(stderr, "4) directory server died\n");
 			close(dir_sock);
