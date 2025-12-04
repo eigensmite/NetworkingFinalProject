@@ -162,7 +162,7 @@ int main(int argc, char **argv)
 	
 	int dir_sock = connect_to_directory(server_name, port, dir_session, x509_cred);
 	if (dir_sock < 0) {
-		fprintf(stderr, "Failed to register with directory server.\n");
+		fprintf(stderr, "Failed to register with directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
 		close(sockfd);
 		close(dir_sock);
 		return EXIT_FAILURE;
@@ -453,7 +453,7 @@ static int connect_to_directory(const char *server_name, int port, gnutls_sessio
     struct sockaddr_in dir_addr;
     memset(&dir_addr, 0, sizeof(dir_addr));
     dir_addr.sin_family = AF_INET;
-    dir_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dir_addr.sin_addr.s_addr = inet_addr(SERV_HOST_ADDR);
     dir_addr.sin_port = htons(SERV_TCP_PORT);
 
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
