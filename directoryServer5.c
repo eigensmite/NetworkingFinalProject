@@ -627,13 +627,13 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						}
 
 						
-						if (strncmp(topic, "Beocat", MAX_USERNAME_LEN) != 0 &&
-							strncmp(topic, "Football", MAX_USERNAME_LEN) != 0 &&
+						if (strncmp(topic, "BeoCat", MAX_USERNAME_LEN) != 0 &&
+							strncmp(topic, "KSU Football", MAX_USERNAME_LEN) != 0 &&
 							strncmp(topic, "Friendsgiving", MAX_USERNAME_LEN) != 0 &&
-							strncmp(topic, "Lounge", MAX_USERNAME_LEN) != 0) 
+							strncmp(topic, "KSU CS Lounge", MAX_USERNAME_LEN) != 0) 
 						{
 								fprintf(stderr, "Invalid topic from chat server: %s\n", topic);
-								fprintf(stderr, "Allowed topics are: Beocat, Football, Friendsgiving, Lounge\n");
+								fprintf(stderr, "Allowed topics are: BeoCat, KSU Football, Friendsgiving, KSU CS Lounge\n");
 								remove_staged_connection(&staged_conns, staged);
 								continue;
 						}
