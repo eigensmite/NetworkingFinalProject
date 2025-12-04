@@ -157,6 +157,8 @@ int main(int argc, char **argv)
 	listen(sockfd, MAX_CLIENTS);
 
 	gnutls_session_t dir_session;
+	gnutls_init(&dir_session, GNUTLS_CLIENT);
+
 	
 	int dir_sock = connect_to_directory(server_name, port, dir_session, x509_cred);
 	if (dir_sock < 0) {
@@ -217,8 +219,9 @@ int main(int argc, char **argv)
 			// (only possible if disconnected)
 			fprintf(stderr, "Disconnected. Check dir server to see cause\n");
 			fprintf(stderr, "1) non-unique topic,\n");
-			fprintf(stderr, "2) maximum servers reached, or\n");
-			fprintf(stderr, "3) directory server died\n");
+			fprintf(stderr, "2) disallowed name (allowed is Beocat, Football, Friendsgiving, Lounge),\n");
+			fprintf(stderr, "3) maximum servers reached, or\n");
+			fprintf(stderr, "4) directory server died\n");
 			close(dir_sock);
 			close(sockfd);
 			return EXIT_FAILURE;
@@ -300,7 +303,7 @@ int main(int argc, char **argv)
 				/* Read the request from the client */
 				//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
 				LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr));
-				printf("Read %zd bytes from client %d\n", ret, clisockfd);
+				printf("Read %d bytes from client %d\n", ret, clisockfd);
 				printf("Buffer now: %s\n", c->inbuf);
 				// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
 				// THE FORMULA FOR READING fIS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
@@ -464,7 +467,7 @@ static int connect_to_directory(const char *server_name, int port, gnutls_sessio
         return -1;
     }
 
-	gnutls_init(&dir_session, GNUTLS_CLIENT);
+	//gnutls_init(&dir_session, GNUTLS_CLIENT); // HAVE TO INIT ABOVE TO SUPPRESS WARNING
 	gnutls_credentials_set(dir_session, GNUTLS_CRD_CERTIFICATE, x509_cred);
 	gnutls_handshake_set_timeout(dir_session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 	gnutls_priority_set_direct(dir_session, "NORMAL", NULL);

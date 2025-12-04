@@ -25,7 +25,8 @@
 
 /* Code from GnuTLS documentation */
 
-#define CHECK(x) assert((x) >= 0)
+// #define CHECK(x) assert((x) >= 0) DONT USE CHECK BECAUSE WE NEED TO GET RETURN VALUES
+
 #define LOOP_CHECK(rval, cmd) \
 	do {                  \
 		rval = cmd;   \
@@ -115,7 +116,7 @@ int main(int argc, char **argv)
 	/* init GnuTLS*/
 
 	gnutls_certificate_credentials_t x509_cred;
-	gnutls_session_t session;
+	//gnutls_session_t session; don't need this here
 
 	gnutls_global_init();
 	gnutls_certificate_allocate_credentials(&x509_cred);
@@ -168,7 +169,7 @@ int main(int argc, char **argv)
 
 	for (;;) {	
 		fd_set readset, writeset;
-		printf("Sanity check\n");
+		//printf("Sanity check\n");
 		/* Initialize and populate your readset and compute maxfd */
 		FD_ZERO(&readset);
 		FD_ZERO(&writeset);
@@ -392,7 +393,7 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 					LOOP_CHECK(ret, gnutls_record_recv(s->session, buf,
 							   MAX));
 
-					printf("Read %zd bytes from server %d\n", ret, serversockfd);
+					printf("Read %d bytes from server %d\n", ret, serversockfd);
 					if (ret == 0) {
 						fprintf(stderr, "%s:%d Error reading from server\n", __FILE__, __LINE__);
 						remove_server(&servers, s);
@@ -422,7 +423,7 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 					LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr,
 							   &(c->inbuf[MAX]) - c->inptr));
 
-					printf("Read %zd bytes from client %d\n", ret, clisockfd);
+					printf("Read %d bytes from client %d\n", ret, clisockfd);
 
 
 					// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
@@ -625,6 +626,17 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 							continue;
 						}
 
+						
+						if (strncmp(topic, "Beocat", MAX_USERNAME_LEN) != 0 &&
+							strncmp(topic, "Football", MAX_USERNAME_LEN) != 0 &&
+							strncmp(topic, "Friendsgiving", MAX_USERNAME_LEN) != 0 &&
+							strncmp(topic, "Lounge", MAX_USERNAME_LEN) != 0) 
+						{
+								fprintf(stderr, "Invalid topic from chat server: %s\n", topic);
+								fprintf(stderr, "Allowed topics are: Beocat, Football, Friendsgiving, Lounge\n");
+								remove_staged_connection(&staged_conns, staged);
+								continue;
+						}
 
 						s = malloc(sizeof(struct server));
 						s->sockfd = staged->sockfd;

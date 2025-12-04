@@ -17,7 +17,7 @@
 
 /* Code from GnuTLS documentation */
 
-#define CHECK(x) assert((x) >= 0)
+//#define CHECK(x) assert((x) >= 0) DONT USE CHECK BECAUSE WE NEED TO GET RETURN VALUES
 #define LOOP_CHECK(rval, cmd) \
 	do {                  \
 		rval = cmd;   \
@@ -203,7 +203,7 @@ int main()
 
                     //write(dir_sock, buf, MAX);
 
-                    int ret = gnutls_record_send(dir_session, buf, MAX);
+                    ret = gnutls_record_send(dir_session, buf, MAX);
                     if (ret < 0) {
                         if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
                             fprintf(stderr, "TLS send would block, try again\n");

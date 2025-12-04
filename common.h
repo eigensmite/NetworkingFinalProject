@@ -1,3 +1,7 @@
+// Macros are unused because this is just a config file
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-macros"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -17,3 +21,5 @@
 
 #define MAX_CLIENTS 5
 #define MAX_SERVERS 2
+
+#pragma GCC diagnostic pop
