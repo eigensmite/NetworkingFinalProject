@@ -73,6 +73,8 @@ struct staged_connection {
 	struct sockaddr_in addr;        	// client address
 	char inbuf[MAX];			  		// input buffer
 	char* inptr;                    	// length of data in input buffer (bytes)
+	char outbuf[MAX];			  		// output buffer
+	char* outptr;                    	// length of data in output buffer (bytes)
 	LIST_ENTRY(staged_connection) entries;  // BSD list linkage
 };
 
@@ -95,8 +97,8 @@ struct server {
 	int listen_port;			    	// server listening port
 	char topic[MAX_USERNAME_LEN];		// server topic
 	// TAILQ_HEAD(, outmsg) msgq;  		// message queue
-	// char inbuf[MAX];			  		// input buffer
-	// char* inptr;                    	// length of data in input buffer (bytes)
+	char outbuf[MAX];			  		// output buffer
+	char* outptr;                    	// length of data in output buffer (bytes)
     LIST_ENTRY(server) server_entries;  // BSD list linkage
 };
 
@@ -110,6 +112,8 @@ static void remove_client(struct clientlist *clients, struct client *c);
 static void remove_staged_connection(struct staged_connection_list *staged_conns, struct staged_connection *staged);
 static void remove_server(struct serverlist *servers, struct server *s);
 static void queue_message(struct client *c, const char *msg);
+static void queue_server_disconnect_message(struct server *s, const char *msg);
+static void queue_staged_disconnect_message(struct staged_connection *staged, const char *msg);
 
 int main(int argc, char **argv)
 {
@@ -207,9 +211,9 @@ int main(int argc, char **argv)
 		LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
 			if (s->sockfd > 0) {          			// sanity check (usually always > 0)
 				FD_SET(s->sockfd, &readset);  		// add to read set
-				//if (!TAILQ_EMPTY(&s->msgq)) {		// has data to write
-				//	FD_SET(s->sockfd, &writeset); 	// add to write set
-				//}
+				if (s->outbuf[0] != '\0') {		// has data to write
+					FD_SET(s->sockfd, &writeset); 	// add to write set
+				}
 				/* Update max_fd */
 				if (s->sockfd > max_fd) max_fd = s->sockfd;
 			}
@@ -219,6 +223,9 @@ int main(int argc, char **argv)
 		LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
 			if (staged->sockfd > 0) {          			// sanity check (usually always > 0)
 				FD_SET(staged->sockfd, &readset);  		// add to read set
+				if (staged->outbuf[0] != '\0') {		// has data to write
+					FD_SET(staged->sockfd, &writeset); 	// add to write set
+				}
 				/* Update max_fd */
 				if (staged->sockfd > max_fd) max_fd = staged->sockfd;
 			}
@@ -376,6 +383,9 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 					new_staged->inbuf[0] = '\0';     // initialize input buffer
 					new_staged->inptr = new_staged->inbuf;    // set input pointer to start of
 
+					new_staged->outbuf[0] = '\0';     // initialize output buffer
+					new_staged->outptr = new_staged->outbuf;    // set output pointer to start of
+
 					LIST_INSERT_HEAD(&staged_conns, new_staged, entries);  // insert at the head
 					printf("Added staged connection %d from addr %s\n", new_staged->sockfd, inet_ntoa(new_staged->addr.sin_addr));
 				}
@@ -407,6 +417,44 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						remove_server(&servers, s);
 						continue;
 					}
+				}
+
+				if (FD_ISSET(serversockfd, &writeset)) {
+					
+					size_t remaining = &(s->outbuf[MAX]) - s->outptr;
+					//size_t sent = s->outptr - s->outbuf;
+
+					printf("Writing %zu bytes to server %d\n\t\t%s", remaining, serversockfd, s->outptr);
+
+					ret = gnutls_record_send(s->session,
+							s->outptr,
+							remaining);
+
+					printf("Wrote %d bytes to sever %d\n", ret, serversockfd);
+
+					if (ret > 0) {
+						s->outptr += ret;
+						if (s->outptr >= &(s->outbuf[MAX])) {
+							//TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
+							//free(m->data);
+							//free(m);
+
+							printf("Finished sending message to server %d\n", serversockfd);
+
+							remove_server(&servers, s);
+
+							printf("Disconnected server %d\n", serversockfd);
+						}
+					} else if (ret < 0) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							// try later
+						} else {
+							fprintf(stderr, "Error writing to server %d: %s\n", serversockfd, strerror(errno));
+							remove_server(&servers, s);
+							continue;
+						}
+					}
+
 				}
 			}
 
@@ -583,7 +631,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 						if (count >= MAX_SERVERS) {
 							fprintf(stderr, "Maximum servers reached. Rejecting server %s\n", inet_ntoa(cli_addr.sin_addr));
-							remove_staged_connection(&staged_conns, staged);
+							//remove_staged_connection(&staged_conns, staged);
+							queue_staged_disconnect_message(staged, "Maximum servers reached. Try again later.\n");
 							continue;  // skip the rest of this iteration
 						}
 
@@ -596,7 +645,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 									char topic[MAX_USERNAME_LEN] = {0};
 									if(sscanf(staged->inptr, "SERVER %*d %23[^\n]", topic) != 1) {
 										fprintf(stderr, "Invalid handshake from chat server\n");
-										remove_staged_connection(&staged_conns, staged);
+										//remove_staged_connection(&staged_conns, staged);
+										queue_staged_disconnect_message(staged, "Invalid handshake from chat server\n");
 										break;
 									}
 									
@@ -613,7 +663,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 							snprintf(buf, MAX, "Username unavailable or invalid, try again:");
 							fprintf(stderr, "%s", buf);
 							//write(newsockfd, buf, MAX);
-							remove_staged_connection(&staged_conns, staged);
+							//remove_staged_connection(&staged_conns, staged);
+							queue_staged_disconnect_message(staged, buf);
 							continue;
 						}
 
@@ -622,7 +673,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						int listen_port = 0;
 						if (sscanf(staged->inptr, "SERVER %d %23[^\n]", &listen_port, topic) != 2) {
 							fprintf(stderr, "Invalid handshake from chat server\n");
-							remove_staged_connection(&staged_conns, staged);
+							//remove_staged_connection(&staged_conns, staged);
+							queue_staged_disconnect_message(staged, "Invalid handshake from chat server\n");
 							continue;
 						}
 
@@ -634,7 +686,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						{
 								fprintf(stderr, "Invalid topic from chat server: %s\n", topic);
 								fprintf(stderr, "Allowed topics are: BeoCat, KSU Football, Friendsgiving, KSU CS Lounge\n");
-								remove_staged_connection(&staged_conns, staged);
+								//remove_staged_connection(&staged_conns, staged);
+								queue_staged_disconnect_message(staged, "Invalid topic. Allowed topics are: BeoCat, KSU Football, Friendsgiving, KSU CS Lounge\n");
 								continue;
 						}
 
@@ -644,10 +697,18 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						s->session = staged->session;
 
 						//str ncpy(s->topic, topic, MAX_USERNAME_LEN-1);
-						sscanf(topic, "%23[^\n]", s->topic);
+						if(sscanf(topic, "%23[^\n]", s->topic) != 1) {
+							fprintf(stderr, "Invalid topic from chat server\n");
+							//remove_staged_connection(&staged_conns, staged);
+							queue_staged_disconnect_message(staged, "Invalid topic from chat server\n");
+							continue;
+						}
 						
 						s->topic[MAX_USERNAME_LEN-1] = '\0';
 						s->listen_port = listen_port;
+
+						s->outbuf[0] = '\0';     // initialize output buffer
+						s->outptr = s->outbuf;    // set output pointer to start of
 
 						//char buf[MAX] = {'\0'};
 						//snprintf(buf, MAX, "Welcome, chatroom server for topic '%s'!", s->topic);
@@ -667,7 +728,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 						if (count >= MAX_CLIENTS) {
 							fprintf(stderr, "Maximum clients reached. Rejecting client %s\n", inet_ntoa(cli_addr.sin_addr));
-							remove_staged_connection(&staged_conns, staged);
+							//remove_staged_connection(&staged_conns, staged);
+							queue_staged_disconnect_message(staged, "Maximum clients reached. Try again later.\n");
 							continue;  // skip the rest of this iteration
 						}
 
@@ -693,6 +755,45 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						remove_staged_connection(&staged_conns, staged);
 					}
 				}
+
+				if (FD_ISSET(stagedsockfd, &writeset)) {
+					
+					size_t remaining = &(staged->outbuf[MAX]) - staged->outptr;
+					//size_t sent = s->outptr - s->outbuf;
+
+					printf("Writing %zu bytes to staged cxn %d\n\t\t%s", remaining, stagedsockfd, staged->outptr);
+
+					ret = gnutls_record_send(staged->session,
+							staged->outptr,
+							remaining);
+
+					printf("Wrote %d bytes to staged cxn %d\n", ret, stagedsockfd);
+
+					if (ret > 0) {
+						staged->outptr += ret;
+						if (staged->outptr >= &(staged->outbuf[MAX])) {
+							//TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
+							//free(m->data);
+							//free(m);
+
+							printf("Finished sending message to staged cxn %d\n", stagedsockfd);
+
+							remove_staged_connection(&staged_conns, staged);
+
+							printf("Disconnected staged cxn %d\n", stagedsockfd);
+						}
+					} else if (ret < 0) {
+						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							// try later
+						} else {
+							fprintf(stderr, "Error writing to staged cxn %d: %s\n", stagedsockfd, strerror(errno));
+							remove_staged_connection(&staged_conns, staged);
+							continue;
+						}
+					}
+
+				}
+
 			} /*     LIST_FOREACH_SAFE staged connections */
 		}
 	} /*                  for (;;) */
@@ -747,6 +848,61 @@ static void queue_message(struct client *c, const char *msg) {
 	TAILQ_INSERT_TAIL(&c->msgq, m, entries);
 }
 
+static void queue_server_disconnect_message(struct server *s, const char *msg) {
+	printf("Queuing disconnect message for server socket %d: %s\n", s->sockfd, msg);
+
+	if (s->outbuf[0] != '\0') {
+		fprintf(stderr, "Server socket %d already has a pending message\n", s->sockfd);
+		return;
+	}
+
+	size_t mlen = strnlen(msg, MAX);
+	if (mlen == 0) return;
+
+	// For servers, we just use the outbuf directly
+	if (mlen + 1 > MAX) {
+		fprintf(stderr, "Disconnect message too long for server socket %d\n", s->sockfd);
+		return;
+	}
+
+	snprintf(s->outbuf, MAX, "%s", msg); // ensure null-termination
+
+	if (mlen < MAX) {
+		s->outbuf[mlen] = '\0';
+	} else {
+		s->outbuf[MAX - 1] = '\0';
+	}
+
+	s->outptr = s->outbuf; // point to start of message
+}
+
+static void queue_staged_disconnect_message(struct staged_connection *staged, const char *msg) {
+	printf("Queuing disconnect message for staged socket %d: %s\n", staged->sockfd, msg);
+
+	if (staged->outbuf[0] != '\0') {
+		fprintf(stderr, "Staged socket %d already has a pending message\n", staged->sockfd);
+		return;
+	}
+
+	size_t mlen = strnlen(msg, MAX);
+	if (mlen == 0) return;
+
+	// For staged connections, we just use the outbuf directly
+	if (mlen + 1 > MAX) {
+		fprintf(stderr, "Disconnect message too long for staged socket %d\n", staged->sockfd);
+		return;
+	}
+
+	snprintf(staged->outbuf, MAX, "%s", msg); // ensure null-termination
+
+	if (mlen < MAX) {
+		staged->outbuf[mlen] = '\0';
+	} else {
+		staged->outbuf[MAX - 1] = '\0';
+	}
+
+	staged->outptr = staged->outbuf; // point to start of message
+}
 
 static void remove_client(struct clientlist *clients, struct client *c) {
     if (clients && c) {

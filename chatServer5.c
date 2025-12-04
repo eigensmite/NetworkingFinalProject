@@ -217,11 +217,21 @@ int main(int argc, char **argv)
 		if (FD_ISSET(dir_sock, &readset)) { 
 			// If directory server socket is readable 
 			// (only possible if disconnected)
-			fprintf(stderr, "Disconnected. Check dir server to see cause\n");
-			fprintf(stderr, "1) non-unique topic,\n");
-			fprintf(stderr, "2) disallowed name\n(only BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
-			fprintf(stderr, "3) maximum servers reached, or\n");
-			fprintf(stderr, "4) directory server died\n");
+
+			char buf[MAX] = {'\0'};
+			LOOP_CHECK(ret, gnutls_record_recv(dir_session, buf, MAX));
+
+			if (ret > 0) {
+				printf("Read %d bytes from dirserv %d\n", ret, dir_sock);
+				printf("\nDisconnected for cause:\n %s\n", buf);
+			} else {
+				fprintf(stderr, "Disconnected. Check dir server to see cause\n");
+				fprintf(stderr, "1) non-unique topic,\n");
+				fprintf(stderr, "2) disallowed name\n(only BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
+				fprintf(stderr, "3) maximum servers reached, or\n");
+				fprintf(stderr, "4) directory server died\n");
+			}
+			
 			close(dir_sock);
 			close(sockfd);
 			return EXIT_FAILURE;

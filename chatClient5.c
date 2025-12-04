@@ -229,6 +229,12 @@ int main()
 					return EXIT_FAILURE;
 				}
 
+                if (strncmp(buf, "Maximum clients reached. Try again later.", 41) == 0) {
+                    fprintf(stderr, "Exiting due to maximum clients reached on directory server.\n");
+                    close(dir_sock);
+                    return EXIT_FAILURE;
+                }
+
                 //fprintf(stderr, "%s\n", buf);
 
                 //fprintf(stderr, "> ");
