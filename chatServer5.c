@@ -219,7 +219,7 @@ int main(int argc, char **argv)
 			// (only possible if disconnected)
 			fprintf(stderr, "Disconnected. Check dir server to see cause\n");
 			fprintf(stderr, "1) non-unique topic,\n");
-			fprintf(stderr, "2) disallowed name\n\t(allowed is BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
+			fprintf(stderr, "2) disallowed name\n(only BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
 			fprintf(stderr, "3) maximum servers reached, or\n");
 			fprintf(stderr, "4) directory server died\n");
 			close(dir_sock);
