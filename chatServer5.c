@@ -71,7 +71,7 @@ struct client {
 
 LIST_HEAD(clientlist, client);
 
-static int connect_to_directory(const char *server_name, int port);
+static int connect_to_directory(const char *server_name, int port, gnutls_session_t dir_session, gnutls_certificate_credentials_t x509_cred);
 
 static void queue_message(struct client *c, const char *msg);
 static void broadcast_message(struct clientlist *clients, int sender_sockfd, const char *message);
@@ -79,7 +79,6 @@ static void remove_client(struct clientlist *clients, struct client *c);
 
 int main(int argc, char **argv)
 {
-
 	
 	// Check command line arguments
 	if (argc != 3) {
@@ -104,7 +103,6 @@ int main(int argc, char **argv)
 	/* init GnuTLS */
 	
 	gnutls_certificate_credentials_t x509_cred;
-	gnutls_session_t session;
 	
 	gnutls_global_init();
 	gnutls_certificate_allocate_credentials(&x509_cred);
@@ -122,56 +120,57 @@ int main(int argc, char **argv)
 
 	//End init GnuTLS
 	
-
 	struct clientlist clients;          // the head of the client list
 	LIST_INIT(&clients);
-
-
+	
+	
 	int sockfd;			/* Listening socket */
 	struct sockaddr_in cli_addr, serv_addr;
-
+	
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("server: can't open stream socket");
 		return EXIT_FAILURE;
 	}
-
+	
 	/* Add SO_REUSEADDRR option to prevent address in use errors (modified from: "Hands-On Network
-	 * Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
+	* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	int true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
 		return EXIT_FAILURE;
 	}
-
+	
 	/* Bind socket to local address */
 	memset((char *) &serv_addr, 0, sizeof(serv_addr));
 	serv_addr.sin_family 		= AF_INET;
 	serv_addr.sin_addr.s_addr 	= htonl(INADDR_ANY);	/* arbitrary IP address */
 	serv_addr.sin_port			= htons(port);			/* port from parameter */
-
+	
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
 		perror("server: can't bind local address");
 		close(sockfd); // unncessary, but good practice
 		return EXIT_FAILURE;
 	}
-
+	
 	printf("Server running on %s:%d\n", inet_ntoa(serv_addr.sin_addr), port);
 	listen(sockfd, MAX_CLIENTS);
 
-	int dir_sock = connect_to_directory(server_name, port);
+	gnutls_session_t dir_session;
+	
+	int dir_sock = connect_to_directory(server_name, port, dir_session, x509_cred);
 	if (dir_sock < 0) {
-        fprintf(stderr, "Failed to register with directory server.\n");
+		fprintf(stderr, "Failed to register with directory server.\n");
 		close(sockfd);
 		close(dir_sock);
 		return EXIT_FAILURE;
     } else {
-        printf("Connected to directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
+		printf("Connected to directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
         // dir_sock sits idle
     }
-
+	
 	for (;;) {
-
+		
 		fd_set readset, writeset;
 		int max_fd = -1;
 
@@ -438,7 +437,7 @@ int main(int argc, char **argv)
 	} /*                  for (;;) */
 }
 
-static int connect_to_directory(const char *server_name, int port) {
+static int connect_to_directory(const char *server_name, int port, gnutls_session_t dir_session, gnutls_certificate_credentials_t x509_cred) {
     int sockfd;
     struct sockaddr_in dir_addr;
     memset(&dir_addr, 0, sizeof(dir_addr));
@@ -457,11 +456,28 @@ static int connect_to_directory(const char *server_name, int port) {
         return -1;
     }
 
+	gnutls_init(&dir_session, GNUTLS_CLIENT);
+	gnutls_credentials_set(dir_session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+	gnutls_handshake_set_timeout(dir_session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+	gnutls_priority_set_direct(dir_session, "NORMAL", NULL);
+	gnutls_transport_set_int(dir_session, sockfd);
+	int ret = 0;
+	LOOP_CHECK(ret, gnutls_handshake(dir_session));
+	if (ret < 0) {
+		close(sockfd);
+		gnutls_deinit(dir_session);
+		fprintf(stderr, "*** Handshake has failed (%s)\n\n",
+			gnutls_strerror(ret));
+		return EXIT_FAILURE;
+	}
+	printf("- Handshake was completed\n");
+
     // Send handshake: "SERVER <port> <server_name>"
     char handshake[MAX] = {0};
     snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
 	printf("Sending handshake to directory server.\n\tHandshake: %s", handshake);
-    if (write(sockfd, handshake, MAX) < 0) {
+	CHECK(ret = gnutls_record_send(dir_session, handshake, MAX));
+    if (ret < 0) {
         perror("handshake failed");
         close(sockfd);
         return -1;

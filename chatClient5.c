@@ -7,12 +7,26 @@
 #include <string.h>
 #include "inet.h"
 #include "common.h"
+#include <assert.h>
 
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <gnutls/abstract.h>
 
-int connect_to_server(const char *ip, int port) {
+#define CAFILE "certs/rootCA.crt"
+
+/* Code from GnuTLS documentation */
+
+#define CHECK(x) assert((x) >= 0)
+#define LOOP_CHECK(rval, cmd) \
+	do {                  \
+		rval = cmd;   \
+	} while (rval == GNUTLS_E_AGAIN || rval == GNUTLS_E_INTERRUPTED)
+
+/* End code from GnuTLS documentation */
+
+int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutls_certificate_credentials_t x509_cred) {
+    printf("Connecting to a server\n");
     int sockfd;
     struct sockaddr_in serv_addr;
     memset((char *)&serv_addr, 0, sizeof(serv_addr));
@@ -31,6 +45,28 @@ int connect_to_server(const char *ip, int port) {
         return -1;
     }
 
+    gnutls_init(session, GNUTLS_CLIENT);
+    gnutls_credentials_set(*session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+	gnutls_handshake_set_timeout(*session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+	gnutls_priority_set_direct(*session, "NORMAL", NULL);
+	gnutls_transport_set_int(*session, sockfd);
+	int ret = 0;
+	LOOP_CHECK(ret, gnutls_handshake(*session));
+	if (ret < 0) {
+		close(sockfd);
+		gnutls_deinit(*session);
+		fprintf(stderr, "*** Handshake has failed (%s)\n\n",
+			gnutls_strerror(ret));
+		return -1;
+	}
+	printf("- Handshake was completed\n");
+
+    //Parse directory server connection
+    // char dn[256];
+    // ssize_t size = sizeof(dn);
+    // gnutls_x509_crt_get_dn(cert, dn, &size);
+    // printf("\tDN: %s\n", dn);
+
     return sockfd;
 }
 
@@ -40,37 +76,45 @@ int main()
 
     int dir_sock;
 
+    gnutls_session_t dir_session;
+    gnutls_certificate_credentials_t x509_cred;
+
+    gnutls_global_init();
+	gnutls_certificate_allocate_credentials(&x509_cred);
+	gnutls_certificate_set_x509_trust_file(x509_cred, CAFILE, GNUTLS_X509_FMT_PEM);
+	//gnutls_certificate_set_x509_key_file(x509_cred, CERTFILE, KEYFILE, GNUTLS_X509_FMT_PEM); //We don't have credentials as the client (in this case)
+
     /* --- Connect to directory server --- */
-    dir_sock = connect_to_server(SERV_HOST_ADDR, SERV_TCP_PORT);
+    dir_sock = connect_to_server(SERV_HOST_ADDR, SERV_TCP_PORT, &dir_session, x509_cred);
     if (dir_sock < 0) return EXIT_FAILURE;
 
     fprintf(stderr, "Connected to directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
 	
     /* --- Send initial CLIENT handshake --- */
-    char handshake[MAX] = {0}; 
-    snprintf(handshake, sizeof(handshake), "CLIENT\n");
-    if (write(dir_sock, handshake, MAX) < 0) {
+    char handshake[MAX] = {'\0'}; 
+    snprintf(handshake, MAX-10, "CLIENT\n");
+    if (gnutls_record_send(dir_session, handshake, MAX) < 0) {
         perror("Error sending CLIENT handshake");
         close(dir_sock);
         return EXIT_FAILURE;
     }
+    printf("Sent CLIENT handshake to directory server\n");
 
     fd_set readset;
-    struct timeval wait_time;
     int sockfd = -1;
     char server_ip[INET_ADDRSTRLEN];
     int server_port;
+    gnutls_session_t server_session;
+
 
 	while (1) {
         /* Wait for response from directory server */
         FD_ZERO(&readset);
         FD_SET(dir_sock, &readset);
-        wait_time.tv_sec = 5;
-        wait_time.tv_usec = 0;
 
-        int n = select(dir_sock + 1, &readset, NULL, NULL, &wait_time);
+        int n = select(dir_sock + 1, &readset, NULL, NULL, NULL);
         if (n <= 0) {
-            fprintf(stderr, "Timeout waiting for directory server\n");
+            fprintf(stderr, "Select error\n");
             close(dir_sock);
             return EXIT_FAILURE;
         }
@@ -94,7 +138,7 @@ int main()
                 }
 
                 /* Connect to selected server */
-                sockfd = connect_to_server(server_ip, server_port);
+                sockfd = connect_to_server(server_ip, server_port, server_session, x509_cred);
                 if (sockfd < 0) {
                     fprintf(stderr, "Failed to connect to server %s:%d\n", server_ip, server_port);
                     close(dir_sock);
@@ -143,11 +187,9 @@ int main()
 		FD_ZERO(&readset);
 		FD_SET(STDIN_FILENO, &readset);
 		FD_SET(sockfd, &readset);
-			wait_time.tv_sec=5;
-			wait_time.tv_usec=0; // Wait time is 5 seconds.
 
 		int n;
-		if ((n=select(sockfd+1, &readset, NULL, NULL, &wait_time)) > 0)
+		if ((n=select(sockfd+1, &readset, NULL, NULL, NULL)) > 0)
 		{
 			/* Check whether there's user input to read */
 			if (FD_ISSET(STDIN_FILENO, &readset)) {

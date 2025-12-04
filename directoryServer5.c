@@ -14,9 +14,14 @@
 #include <gnutls/x509.h>
 #include <gnutls/abstract.h>
 
+//This should be the private key for the directory server
 #define KEYFILE "certs/directorykey.pem" //TODO: certs/rootCA.key (should this be rootCAkey.pem like the others?)
-#define CERTFILE "certs/directorycert.pem" //TODO: certs/rootCA.crt (this should also be the self-signed certificate (i think?))
-#define CAFILE "certs/ca-certificates.crt" //TODO: certs/rootCA.crt (this should be the self-signed certificate)
+
+//This should be the certificate file for the directory server
+#define CERTFILE "certs/directory.crt" //TODO: certs/rootCA.crt (this should also be the self-signed certificate (i think?))
+
+//This should be the certificate for the certificate authority
+#define CAFILE "certs/rootCA.crt" //TODO: certs/rootCA.crt (this should be the self-signed certificate)
 
 /* Code from GnuTLS documentation */
 
@@ -163,10 +168,11 @@ int main(int argc, char **argv)
 
 	for (;;) {	
 		fd_set readset, writeset;
-
+		printf("Sanity check\n");
 		/* Initialize and populate your readset and compute maxfd */
 		FD_ZERO(&readset);
 		FD_ZERO(&writeset);
+		FD_SET(sockfd, &readset);
 
 		int ret = 0;
 
@@ -216,17 +222,20 @@ int main(int argc, char **argv)
 				if (staged->sockfd > max_fd) max_fd = staged->sockfd;
 			}
 		}
-
+		printf("blocking call start\n");
 		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
+		printf("blocking call stop\n");
 		if (sel < 0) {
+			printf("Select is < 0\n");
 			if (errno == EINTR) continue;
 			perror("select");
 			close(sockfd);
 			return EXIT_FAILURE;
 		} else if (sel == 0) {
+			printf("Select is 0\n");
 			continue; /* shouldn't happen with NULL timeout */
 		} else if (sel > 0) {
-
+			printf("Select > 0\n");
 			/* Check to see if our listening socket has a pending connection */
 			if (FD_ISSET(sockfd, &readset)) {
 				/* Accept a new connection request */
@@ -258,6 +267,7 @@ int main(int argc, char **argv)
 						continue;
 					}
 
+					printf("Making new session object for connection\n");
 					gnutls_session_t session;
 
 					/* Code from GnuTLS documentation */
@@ -268,6 +278,8 @@ int main(int argc, char **argv)
 										GNUTLS_CERT_IGNORE);
 					gnutls_handshake_set_timeout(session,
 									GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+
+					gnutls_priority_set_direct(session, "NORMAL", NULL);
 
 					gnutls_transport_set_int(session, newsockfd);
 
@@ -335,7 +347,7 @@ int main(int argc, char **argv)
 				if (FD_ISSET(clisockfd, &readset)) {
 
 					//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					LOOP_CHECK(ret, gnutls_record_recv(s->session, c->inptr,
+					LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr,
 							   &(c->inbuf[MAX]) - c->inptr));
 
 					printf("Read %zd bytes from client %d\n", ret, clisockfd);
@@ -427,7 +439,7 @@ int main(int argc, char **argv)
 
 					//ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
 					
-					CHECK(gnutls_record_send(c->session, m->data + m->sent, ret));
+					CHECK(gnutls_record_send(c->session, m->data + m->sent, remaining));
 
 					if (ret > 0) {
 						m->sent += ret;
@@ -480,7 +492,7 @@ int main(int argc, char **argv)
 
 					if (strncmp(staged->inptr, "SERVER", 6) == 0) {
 						// --- Register new chatroom server ---
-
+						printf("Registering a new chatserver\n");
 						int count = 0;
 						LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) count++;
 
@@ -553,6 +565,7 @@ int main(int argc, char **argv)
 					} 
 					else if (strncmp(staged->inptr, "CLIENT", 6) == 0) {
 						// --- Register new user client ---
+						printf("Got a new client handshake\n");
 						int count = 0;
 						LIST_FOREACH_SAFE(c, &clients, client_entries, tmp_c) count++;
 
@@ -611,6 +624,7 @@ void broadcast_serverlist(struct serverlist *servers, struct client *c) {
 }
 
 static void queue_message(struct client *c, const char *msg) {
+	printf("Queuing %s for socket %d\n", msg, c);
 	size_t mlen = strnlen(msg, MAX);
     if (mlen == 0) return;
 
