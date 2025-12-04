@@ -222,9 +222,54 @@ int main(int argc, char **argv)
 				if (staged->sockfd > max_fd) max_fd = staged->sockfd;
 			}
 		}
+
+
+
+fprintf(stderr, "\n--- PRE-SELECT DUMP ---\n");
+fprintf(stderr, "listen sockfd = %d\n", sockfd);
+fprintf(stderr, "max_fd = %d\n", max_fd);
+
+fprintf(stderr, "[clients]\n");
+LIST_FOREACH(c, &clients, client_entries) {
+    fprintf(stderr, "  client fd=%d\n", c->sockfd);
+}
+
+fprintf(stderr, "[servers]\n");
+LIST_FOREACH(s, &servers, server_entries) {
+    fprintf(stderr, "  server fd=%d\n", s->sockfd);
+}
+
+fprintf(stderr, "[staged]\n");
+LIST_FOREACH(staged, &staged_conns, entries) {
+    fprintf(stderr, "  staged fd=%d\n", staged->sockfd);
+}
+
+fprintf(stderr, "--- END PRE-SELECT ---\n");
+fflush(stderr);
+
+
+
+
+
+
+
+
 		printf("blocking call start\n");
 		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
 		printf("blocking call stop\n");
+
+
+fprintf(stderr, "\n--- POST-SELECT DUMP (sel=%d) ---\n", sel);
+for (int fd = 0; fd <= max_fd; fd++) {
+    if (FD_ISSET(fd, &readset))  fprintf(stderr, " READ READY fd=%d\n", fd);
+    if (FD_ISSET(fd, &writeset)) fprintf(stderr, " WRITE READY fd=%d\n", fd);
+}
+fprintf(stderr, "--- END POST-SELECT ---\n");
+fflush(stderr);
+
+
+
+
 		if (sel < 0) {
 			printf("Select is < 0\n");
 			if (errno == EINTR) continue;
@@ -236,11 +281,37 @@ int main(int argc, char **argv)
 			continue; /* shouldn't happen with NULL timeout */
 		} else if (sel > 0) {
 			printf("Select > 0\n");
+
+
+
+
+if (sockfd < 0) {
+    fprintf(stderr, "ERROR: listening socket was closed! sockfd=%d\n", sockfd);
+}
+if (fcntl(sockfd, F_GETFL) == -1) {
+    perror("ERROR: listening socket invalid (F_GETFL)");
+}
+
+
+
+
+
+
+
 			/* Check to see if our listening socket has a pending connection */
 			if (FD_ISSET(sockfd, &readset)) {
+
+
+fprintf(stderr, ">>> LISTEN SOCKET IS READABLE <<<\n");
+fflush(stderr);
+
+
+
 				/* Accept a new connection request */
 				socklen_t clilen = sizeof(cli_addr);
 				int newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+
+				printf("Accepted new connection from %s\n", inet_ntoa(cli_addr.sin_addr));
 
 				if (newsockfd < 0) {
 					perror("server: accept error");
@@ -441,6 +512,14 @@ int main(int argc, char **argv)
 					
 					CHECK(gnutls_record_send(c->session, m->data + m->sent, remaining));
 
+					printf("Writing %zu bytes to client %d\n\t\t> %s", remaining, clisockfd, m->data + m->sent);
+
+					ret = gnutls_record_send(c->session,
+							m->data + m->sent,
+							remaining);
+
+					printf("Wrote %d bytes to client %d\n", ret, clisockfd);
+
 					if (ret > 0) {
 						m->sent += ret;
 						if (m->sent == m->len) {
@@ -448,9 +527,13 @@ int main(int argc, char **argv)
 							free(m->data);
 							free(m);
 
+							printf("Finished sending message to client %d\n", clisockfd);
+
 							if (c->redirecting && TAILQ_EMPTY(&c->msgq)) {
 								// Client has been sent the server info, disconnect them
 								remove_client(&clients, c);
+
+								printf("Disconnected client %d after redirecting\n", clisockfd);
 							}
 						}
 					} else if (ret < 0) {

@@ -120,16 +120,49 @@ int main()
         }
 
         if (FD_ISSET(dir_sock, &readset)) {
-            ssize_t nread = read(dir_sock, buf, MAX - 1);
-            if (nread <= 0) {
-                fprintf(stderr, "Directory server closed connection\n");
-                close(dir_sock);
+            //ssize_t nread = read(dir_sock, buf, MAX - 1);
+                /*    if (nread <= 0) {
+                    fprintf(stderr, "Directory server closed connection\n");
+                    close(dir_sock);
+                    return EXIT_FAILURE;
+                }
+                buf[nread] = '\0'; */
+
+
+            int ret = gnutls_record_recv(dir_session, buf, MAX);
+            if (ret == 0) {
+                fprintf(stderr, "TLS connection closed by directory server\n");
+                //gnutls _bye(server_session, GNUTLS_SHUT_RDWR);
+                fprintf(stderr, "%s:%d Error reading from directory server\n", __FILE__, __LINE__); //DEBUG
+                close(sockfd);
                 return EXIT_FAILURE;
             }
-            buf[nread] = '\0';
+            else if (ret < 0) {
+                if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+                    // Non-fatal, try again later
+                    fprintf(stderr, "TLS recv would block, retrying\n");
+                    continue;
+                } else {
+                    fprintf(stderr, "TLS recv failed: %s\n", gnutls_strerror(ret));
+                    close(sockfd);
+                    return EXIT_FAILURE;
+                }
+            }
+            //else {
+            if (ret < MAX) buf[ret] = '\0';  // null-terminate the string
+            else buf[MAX - 1] = '\0'; // ensure null-termination
+
+                //fprintf(stderr, "\r\033[K");
+                //fprintf(stderr, "%s\n", buf);
+
+                //fprintf(stderr, "> ");
+                //fflush(stderr);
+
+                //fprintf(stderr, "DEBUG: Received %d bytes over TLS\n", ret);
 
             /* Check if server accepted client */
             if (strncmp(buf, "SERVER_INFO ", 12) == 0) {
+                printf("Directory server provided server info: %s\n", buf);
                 /* Parse IP and PORT */
                 if (sscanf(buf + 12, "%63s %d", server_ip, &server_port) != 2) {
                     fprintf(stderr, "Malformed SERVER_INFO: %s\n", buf);
@@ -138,7 +171,7 @@ int main()
                 }
 
                 /* Connect to selected server */
-                sockfd = connect_to_server(server_ip, server_port, server_session, x509_cred);
+                sockfd = connect_to_server(server_ip, server_port, &server_session, x509_cred);
                 if (sockfd < 0) {
                     fprintf(stderr, "Failed to connect to server %s:%d\n", server_ip, server_port);
                     close(dir_sock);
@@ -166,7 +199,22 @@ int main()
                         buf[strnlen(buf, MAX) - 1] = '\0'; // Remove newline
                     }
 
-                    write(dir_sock, buf, MAX);
+                    //write(dir_sock, buf, MAX);
+
+                    int ret = gnutls_record_send(dir_session, buf, MAX);
+                    if (ret < 0) {
+                        if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+                            fprintf(stderr, "TLS send would block, try again\n");
+                        } else {
+                            fprintf(stderr, "TLS send failed: %s\n", gnutls_strerror(ret));
+                            close(sockfd);
+                            return EXIT_FAILURE;
+                        }
+                    } else {
+                        fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
+                    }
+
+
                 } else {
 					fprintf(stderr, "Error reading user input\n");
 					close(dir_sock);
@@ -205,7 +253,21 @@ int main()
 					#pragma GCC diagnostic pop
 
 					/* Send the user's message to the server */
-					write(sockfd, buf, MAX);
+					//write(sockfd, buf, MAX);
+
+                    int ret = gnutls_record_send(server_session, buf, MAX);
+                    if (ret < 0) {
+                        if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+                            fprintf(stderr, "TLS send would block, try again\n");
+                        } else {
+                            fprintf(stderr, "TLS send failed: %s\n", gnutls_strerror(ret));
+                            close(sockfd);
+                            return EXIT_FAILURE;
+                        }
+                    } else {
+                        fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
+                    }
+
 				} else {
 					fprintf(stderr, "%s:%d Error reading or parsing user input\n", __FILE__, __LINE__); //DEBUG
 				}
@@ -215,13 +277,47 @@ int main()
 
 			/* Check whether there's a message from the server to read */
 			if (FD_ISSET(sockfd, &readset)) {
-				ssize_t nread = read(sockfd, buf, MAX);
-				if (nread <= 0) {
+                int ret = gnutls_record_recv(server_session, buf, MAX);
+
+                if (ret == 0) {
+                    fprintf(stderr, "TLS connection closed by server\n");
+                    //gnutls _bye(server_session, GNUTLS_SHUT_RDWR);
+                    fprintf(stderr, "%s:%d Error reading from server\n", __FILE__, __LINE__); //DEBUG
+
+                    close(sockfd);
+                    return EXIT_FAILURE;
+                }
+                else if (ret < 0) {
+                    if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+                        // Non-fatal, try again later
+                        fprintf(stderr, "TLS recv would block, retrying\n");
+                        continue;
+                    } else {
+                        fprintf(stderr, "TLS recv failed: %s\n", gnutls_strerror(ret));
+                        close(sockfd);
+                        return EXIT_FAILURE;
+                    }
+                }
+                else {
+					if (ret < MAX) buf[ret] = '\0';  // null-terminate the string
+					else buf[MAX - 1] = '\0'; // ensure null-termination
+
+                    fprintf(stderr, "\r\033[K");
+                    fprintf(stderr, "%s\n", buf);
+
+                    fprintf(stderr, "> ");
+                    fflush(stderr);
+
+                    //fprintf(stderr, "DEBUG: Received %d bytes over TLS\n", ret);
+                }
+
+                /* ssize_t nread = read(sockfd, buf, MAX);
+				 if (nread <= 0) {
 					fprintf(stderr, "\r\033[K");  // Clear the current line
 					fprintf(stderr, "%s:%d Error reading from server\n", __FILE__, __LINE__); //DEBUG
 					close(sockfd);
 					return EXIT_FAILURE;
-				} else {
+				 } else {
 					//fprintf(stderr, "%s:%d Read %zd bytes from server: %s\n", __FILE__, __LINE__, nread, s); //DEBUG
 					if (nread < MAX) buf[nread] = '\0';  // null-terminate the string
 					else buf[MAX - 1] = '\0'; // ensure null-termination
@@ -232,7 +328,10 @@ int main()
 
 					fprintf(stderr, "> "); // Prompt for input
 					fflush(stderr);
-				}
+				 } */
+
+
+
 			}
 		}
 	}
