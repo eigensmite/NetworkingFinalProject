@@ -130,9 +130,10 @@ int main()
 
 
             int ret = gnutls_record_recv(dir_session, buf, MAX);
+            printf("Read returned %d\n", ret);
             if (ret == 0) {
                 fprintf(stderr, "TLS connection closed by directory server\n");
-                //gnutls _bye(server_session, GNUTLS_SHUT_RDWR);
+                gnutls_bye(dir_session, GNUTLS_SHUT_RDWR); 
                 fprintf(stderr, "%s:%d Error reading from directory server\n", __FILE__, __LINE__); //DEBUG
                 close(sockfd);
                 return EXIT_FAILURE;
@@ -161,6 +162,7 @@ int main()
                 //fprintf(stderr, "DEBUG: Received %d bytes over TLS\n", ret);
 
             /* Check if server accepted client */
+            //printf("Read buffer: %s\n", buf);
             if (strncmp(buf, "SERVER_INFO ", 12) == 0) {
                 printf("Directory server provided server info: %s\n", buf);
                 /* Parse IP and PORT */
@@ -211,7 +213,7 @@ int main()
                             return EXIT_FAILURE;
                         }
                     } else {
-                        fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
+                        //fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
                     }
 
 
@@ -245,12 +247,25 @@ int main()
 				if (fgets(buf, MAX, stdin)) {
 
 					// Trim newline if present
-					char fmt[20];
-					snprintf(fmt, sizeof(fmt), "%%%d[^\n]", MAX - 1);
-					#pragma GCC diagnostic push
-					#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-					sscanf(buf, fmt, buf);
-					#pragma GCC diagnostic pop
+				    /* char fmt[20];
+					    snprintf(fmt, sizeof(fmt), "%%%d[^\n]", MAX - 1);
+                        #pragma GCC diagnostic push
+                        #pragma GCC diagnostic ignored "-Wformat-nonliteral"
+                        sscanf(buf, fmt, buf);
+                        #pragma GCC diagnostic pop
+                    */
+
+                    //fprintf(buf, "%99[^\n]", buf);
+
+                    if(sscanf(buf, " %1000[^\n]", buf) != 1) // Remove newline character
+					{
+						fprintf(stderr, "%s:%d Error reading or parsing user input\n", __FILE__, __LINE__); //DEBUG
+						fprintf(stderr, "> "); // Prompt for input
+						fflush(stderr);
+ 
+						continue;
+					}
+
 
 					/* Send the user's message to the server */
 					//write(sockfd, buf, MAX);
@@ -265,7 +280,7 @@ int main()
                             return EXIT_FAILURE;
                         }
                     } else {
-                        fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
+                        //fprintf(stderr, "DEBUG: Sent %d bytes over TLS\n", ret);
                     }
 
 				} else {
@@ -273,6 +288,7 @@ int main()
 				}
 				fprintf(stderr, "> "); // Prompt for input
 				fflush(stderr);
+                fflush(stdin);
 			}
 
 			/* Check whether there's a message from the server to read */

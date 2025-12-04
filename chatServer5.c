@@ -260,9 +260,10 @@ int main(int argc, char **argv)
 
 			//TLS Handshake with new client
 			gnutls_session_t session;
-			gnutls_init(&session, GNUTLS_CLIENT); //TODO: Verify that this is correct
+			gnutls_init(&session, GNUTLS_SERVER); //TODO: Verify that this is correct
 			gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
 			gnutls_handshake_set_timeout(session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+			gnutls_priority_set_direct(session, "NORMAL", NULL);
 			gnutls_transport_set_int(session, newsockfd);
 
 			LOOP_CHECK(ret, gnutls_handshake(session));
@@ -300,7 +301,7 @@ int main(int argc, char **argv)
 				//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
 				LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr));
 				printf("Read %zd bytes from client %d\n", ret, clisockfd);
-
+				printf("Buffer now: %s\n", c->inbuf);
 				// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
 				// THE FORMULA FOR READING fIS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
 				// AT END OF BUFFER. AS OF NOW, &(c->inbuf[MAX]) - c->inptr IS THE CORRECT FORMULA.
@@ -415,7 +416,14 @@ int main(int argc, char **argv)
 
 				//TODO: Does this need to get changed the same way nread was changed?
 				//ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
-				CHECK(gnutls_record_send(c->session, m->data + m->sent, ret));
+				//CHECK(gnutls_record_send(c->session, m->data + m->sent, ret));
+
+				ret = gnutls_record_send(c->session,
+					m->data + m->sent,
+					remaining);
+
+				printf("Wrote %d bytes to client %d\n", ret, clisockfd);
+
 				if (ret > 0) {
 					m->sent += ret;
 					if (m->sent == m->len) {

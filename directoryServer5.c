@@ -224,7 +224,7 @@ int main(int argc, char **argv)
 		}
 
 
-
+/*
 fprintf(stderr, "\n--- PRE-SELECT DUMP ---\n");
 fprintf(stderr, "listen sockfd = %d\n", sockfd);
 fprintf(stderr, "max_fd = %d\n", max_fd);
@@ -246,6 +246,7 @@ LIST_FOREACH(staged, &staged_conns, entries) {
 
 fprintf(stderr, "--- END PRE-SELECT ---\n");
 fflush(stderr);
+*/
 
 
 
@@ -254,18 +255,18 @@ fflush(stderr);
 
 
 
-		printf("blocking call start\n");
+		//printf("blocking call start\n");
 		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
-		printf("blocking call stop\n");
+		//printf("blocking call stop\n");
 
-
+/*
 fprintf(stderr, "\n--- POST-SELECT DUMP (sel=%d) ---\n", sel);
 for (int fd = 0; fd <= max_fd; fd++) {
     if (FD_ISSET(fd, &readset))  fprintf(stderr, " READ READY fd=%d\n", fd);
     if (FD_ISSET(fd, &writeset)) fprintf(stderr, " WRITE READY fd=%d\n", fd);
 }
 fprintf(stderr, "--- END POST-SELECT ---\n");
-fflush(stderr);
+fflush(stderr);*/
 
 
 
@@ -277,20 +278,20 @@ fflush(stderr);
 			close(sockfd);
 			return EXIT_FAILURE;
 		} else if (sel == 0) {
-			printf("Select is 0\n");
+			//printf("Select is 0\n");
 			continue; /* shouldn't happen with NULL timeout */
 		} else if (sel > 0) {
-			printf("Select > 0\n");
+			//printf("Select > 0\n");
 
 
 
-
+/*
 if (sockfd < 0) {
     fprintf(stderr, "ERROR: listening socket was closed! sockfd=%d\n", sockfd);
 }
 if (fcntl(sockfd, F_GETFL) == -1) {
     perror("ERROR: listening socket invalid (F_GETFL)");
-}
+}*/
 
 
 
@@ -302,8 +303,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 			if (FD_ISSET(sockfd, &readset)) {
 
 
-fprintf(stderr, ">>> LISTEN SOCKET IS READABLE <<<\n");
-fflush(stderr);
+//fprintf(stderr, ">>> LISTEN SOCKET IS READABLE <<<\n");
+//fflush(stderr);
 
 
 
@@ -496,7 +497,7 @@ fflush(stderr);
 
 						//remove_client(&clients, c);
 
-						fprintf(stderr, "Disconnected client %d after sending server info\n", clisockfd);
+						fprintf(stderr, "Flagged for disconnection client %d after sending server info\n", clisockfd);
 						continue;	
 					}
 				}
@@ -510,7 +511,7 @@ fflush(stderr);
 
 					//ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
 					
-					CHECK(gnutls_record_send(c->session, m->data + m->sent, remaining));
+					//CHECK(gnutls_record_send(c->session, m->data + m->sent, remaining));
 
 					printf("Writing %zu bytes to client %d\n\t\t> %s", remaining, clisockfd, m->data + m->sent);
 
@@ -639,8 +640,8 @@ fflush(stderr);
 						//char buf[MAX] = {'\0'};
 						//snprintf(buf, MAX, "Welcome, chatroom server for topic '%s'!", s->topic);
 						//write(newsockfd, buf, MAX);
-						fprintf(stderr, "Server %s has registered. It's listening at %s:%d", s->topic, inet_ntoa(cli_addr.sin_addr), listen_port);
-						fprintf(stderr, " Connected from %s\n", inet_ntoa(cli_addr.sin_addr));
+						fprintf(stderr, "Server %s has registered. It's listening at %s:%d\n", s->topic, inet_ntoa(cli_addr.sin_addr), listen_port);
+						fprintf(stderr, "Connected from %s\n", inet_ntoa(cli_addr.sin_addr));
 						LIST_INSERT_HEAD(&servers, s, server_entries);
 
 						free(staged);
@@ -707,7 +708,7 @@ void broadcast_serverlist(struct serverlist *servers, struct client *c) {
 }
 
 static void queue_message(struct client *c, const char *msg) {
-	printf("Queuing %s for socket %d\n", msg, c);
+	printf("Queuing %s for socket %d\n", msg, c->sockfd);
 	size_t mlen = strnlen(msg, MAX);
     if (mlen == 0) return;
 
