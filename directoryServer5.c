@@ -14,9 +14,9 @@
 #include <gnutls/x509.h>
 #include <gnutls/abstract.h>
 
-#define KEYFILE "certs/directorykey.pem"
-#define CERTFILE "certs/directorycert.pem"
-#define CAFILE "certs/ca-certificates.crt"
+#define KEYFILE "certs/directorykey.pem" //TODO: certs/rootCA.key (should this be rootCAkey.pem like the others?)
+#define CERTFILE "certs/directorycert.pem" //TODO: certs/rootCA.crt (this should also be the self-signed certificate (i think?))
+#define CAFILE "certs/ca-certificates.crt" //TODO: certs/rootCA.crt (this should be the self-signed certificate)
 
 /* Code from GnuTLS documentation */
 

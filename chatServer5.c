@@ -8,10 +8,31 @@
 #include <sys/queue.h> // for BSD linked list macros
 #include "inet.h"
 #include "common.h"
+#include <assert.h>
 
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 #include <gnutls/abstract.h>
+
+#define CAFILE "certs/rootCA.crt" //TODO: Is this the correct file for authority?
+#define BEOCATCERT "certs/beocat.crt"
+#define BEOCATKEY "certs/beocatkey.pem"
+#define FOOTBALLCERT "certs/football.crt"
+#define FOOTBALLKEY "certs/footballkey.pem"
+#define FRIENDSGIVINGCERT "certs/friendsgiving.crt"
+#define FRIENDSGIVINGKEY "certs/friendsgivingkey.pem"
+#define LOUNGECERT "certs/lounge.crt"
+#define LOUNGEKEY "certs/loungekey.pem"
+
+/* Code from GnuTLS documentation */
+
+#define CHECK(x) assert((x) >= 0)
+#define LOOP_CHECK(rval, cmd) \
+	do {                  \
+		rval = cmd;   \
+	} while (rval == GNUTLS_E_AGAIN || rval == GNUTLS_E_INTERRUPTED)
+
+/* End code from GnuTLS documentation */
 
 #define LIST_FOREACH_SAFE(var, head, field, tvar) \
     for ((var) = LIST_FIRST((head)); \
@@ -38,6 +59,7 @@ struct outmsg {
 };
 
 struct client {
+	gnutls_session_t session;
     int sockfd;                     	// client socket
     struct sockaddr_in addr;        	// client address
 	char nickname[MAX_USERNAME_LEN];	// client nickname
@@ -55,22 +77,23 @@ static void queue_message(struct client *c, const char *msg);
 static void broadcast_message(struct clientlist *clients, int sender_sockfd, const char *message);
 static void remove_client(struct clientlist *clients, struct client *c);
 
-
-
 int main(int argc, char **argv)
 {
+
+	
 	// Check command line arguments
 	if (argc != 3) {
-        fprintf(stderr, "Usage: %s <server_name> <port>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <server_name> <port>\n", argv[0]);
         return EXIT_FAILURE;
     }
+
 	
 	// Extract server name
 	char server_name[MAX_USERNAME_LEN] = {0};
 	snprintf(server_name, MAX_USERNAME_LEN, "%.*s", MAX_USERNAME_LEN - 1, argv[1]);
 	printf("%.*s\n", MAX_USERNAME_LEN - 1, argv[1]);
 	server_name[MAX_USERNAME_LEN - 1] = '\0';
-
+	
 	// Extract port number
     int port;
 	if(sscanf(argv[2], "%d", &port) != 1) {
@@ -78,7 +101,27 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}	
 	
+	/* init GnuTLS */
+	
+	gnutls_certificate_credentials_t x509_cred;
+	gnutls_session_t session;
+	
+	gnutls_global_init();
+	gnutls_certificate_allocate_credentials(&x509_cred);
+	gnutls_certificate_set_x509_trust_file(x509_cred, CAFILE, GNUTLS_X509_FMT_PEM);
+	//Set which chat server we are creating
+	if(strncmp(server_name, "Beocat", MAX_USERNAME_LEN) == 0) {
+		gnutls_certificate_set_x509_key_file(x509_cred, BEOCATCERT, BEOCATKEY, GNUTLS_X509_FMT_PEM);
+	} else if(strncmp(server_name, "Football", MAX_USERNAME_LEN) == 0) {
+		gnutls_certificate_set_x509_key_file(x509_cred, FOOTBALLCERT, FOOTBALLKEY, GNUTLS_X509_FMT_PEM);
+	} else if(strncmp(server_name, "Friendsgiving", MAX_USERNAME_LEN) == 0) {
+		gnutls_certificate_set_x509_key_file(x509_cred, FRIENDSGIVINGCERT, FRIENDSGIVINGKEY, GNUTLS_X509_FMT_PEM);
+	} else if(strncmp(server_name, "Lounge", MAX_USERNAME_LEN) == 0) {
+		gnutls_certificate_set_x509_key_file(x509_cred, LOUNGECERT, LOUNGEKEY, GNUTLS_X509_FMT_PEM);
+	}
 
+	//End init GnuTLS
+	
 
 	struct clientlist clients;          // the head of the client list
 	LIST_INIT(&clients);
@@ -131,6 +174,8 @@ int main(int argc, char **argv)
 
 		fd_set readset, writeset;
 		int max_fd = -1;
+
+		int ret = 0;
 
 		/* Initialize and populate your readset and compute maxfd */
 		FD_ZERO(&readset);
@@ -214,6 +259,23 @@ int main(int argc, char **argv)
 				continue;
 			}
 
+			//TLS Handshake with new client
+			gnutls_session_t session;
+			gnutls_init(&session, GNUTLS_CLIENT); //TODO: Verify that this is correct
+			gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
+			gnutls_handshake_set_timeout(session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+			gnutls_transport_set_int(session, newsockfd);
+
+			LOOP_CHECK(ret, gnutls_handshake(session));
+			if (ret < 0) {
+				close(newsockfd);
+				gnutls_deinit(session);
+				fprintf(stderr, "*** handshake has failed (%s)\n\n", gnutls_strerror(ret));
+				continue;
+			}
+			printf("- GNUTLS Handshake completed");
+
+			c->session = session;	// set client tls session
 			c->sockfd = newsockfd; 	// set client socket
 			c->addr = cli_addr;		// set client address
 			c->nickname[0] = '\0';  // no nickname yet
@@ -236,13 +298,14 @@ int main(int argc, char **argv)
 			if (FD_ISSET(clisockfd, &readset)) {
 
 				/* Read the request from the client */
-				ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-				printf("Read %zd bytes from client %d\n", nread, clisockfd);
+				//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
+				LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr));
+				printf("Read %zd bytes from client %d\n", ret, clisockfd);
 
 				// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
 				// THE FORMULA FOR READING fIS WRONG, SINCE ITERATION CONTINUES IF POINTER ISN'T
 				// AT END OF BUFFER. AS OF NOW, &(c->inbuf[MAX]) - c->inptr IS THE CORRECT FORMULA.
-				if (nread == 0) { 
+				if (ret == 0) { 
                     /* orderly shutdown by client */
                     char msg[MAX];
                     snprintf(msg, sizeof(msg), "<Server> %s has left the chat.", c->nickname);
@@ -250,7 +313,7 @@ int main(int argc, char **argv)
                     remove_client(&clients, c);
                     //continue; /* c is freed - continue with next in loop */
 				}
-				else if (nread < 0) {
+				else if (ret < 0) {
 					//fprintf(stderr, "%s:%d Error reading from client\n", __FILE__, __LINE__);
 
 					/* Not every error is fatal. Check the return value and act accordingly. */
@@ -267,7 +330,7 @@ int main(int argc, char **argv)
 				else /* if (nread > 0) */ {
 				
 					//fprintf(stderr, "Read %zd bytes from client %d\n", nread, clisockfd);
-					c->inptr += nread; // advance input pointer
+					c->inptr += ret; // advance input pointer
 					//if (! (c->inptr >= &(c->inbuf[MAX]))) continue; // not a full message yet
 					if ((c->inptr < &(c->inbuf[MAX]))) continue; // not a full message yet
 
@@ -351,15 +414,17 @@ int main(int argc, char **argv)
 
 				size_t remaining = m->len - m->sent;
 
-				ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
-				if (nwrite > 0) {
-					m->sent += nwrite;
+				//TODO: Does this need to get changed the same way nread was changed?
+				//ssize_t nwrite = write(clisockfd, m->data + m->sent, remaining); // can probably write as MAX FIXME
+				CHECK(gnutls_record_send(c->session, m->data + m->sent, ret));
+				if (ret > 0) {
+					m->sent += ret;
 					if (m->sent == m->len) {
 						TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
 						free(m->data);
 						free(m);
 					}
-				} else if (nwrite < 0) {
+				} else if (ret < 0) {
 					if (errno == EAGAIN || errno == EWOULDBLOCK) {
 						// try later 
 					} else {
@@ -392,7 +457,7 @@ static int connect_to_directory(const char *server_name, int port) {
         return -1;
     }
 
-    // Send handshake: "SERVER <server_name>"
+    // Send handshake: "SERVER <port> <server_name>"
     char handshake[MAX] = {0};
     snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
 	printf("Sending handshake to directory server.\n\tHandshake: %s", handshake);
