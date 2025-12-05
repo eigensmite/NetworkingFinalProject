@@ -1,16 +1,20 @@
+# CIS 525 Programming Assignment 7
 
-1. Copy the files to your own directory.
+## Group 7: Braden Adams, Charlie Bergdall, Matt Kelley, and John Stanley
 
-2. Modify inet.h to reflect the host you are currently logged into.
-   Also, modify the port numbers to be used to reduce the likelihood
-   of conflicting with another server.
+This is a chatroom application with three components. The directory server keeps track of a list of available servers and allows new chat servers to connect to the directory server. Chat clients can connect to the directory server to collect a list of servers, then select one to get redirected to. Chat clients then connect to the chat server they were redirected to with a new TLS session. All communication between the various components of this system is made secure with TLS certificates signed by a self-signed certificate authority (matt-arch). Any falsified certificates will cause the system to drop the connection as they are not signed by the agreed upon certificate authority.
 
-3. Compile the source code using the command: make
+NOTE: When starting up `./chatServer5 <topic> <port>`, the call format must start up one of the following servers. Others will be rejected:
+"KSU Football", "BeoCat", "KSU CS Lounge", and "Friendsgiving"
 
-4. Start the directory server in one host in the foreground (./directoryServer2)
+To compile and run:
 
-5. Start a chat server in another host in the foreground (make sure it has the same IP as directory server) (./chatServer2 <chat topic> <port>)
+1. Call `make`
 
-6. Start the client on another host in the foreground: ./chatClient2
+2. Call `./directoryServer5`
 
-7. Remember to kill the servers before logging off.
+3. In a new terminal: `./chatServer5 "KSU Football" 58379` (you may substitute the topic for one listed above and the port for any valid port)
+
+4. In another new terminal: `./chatClient5`
+
+5. You may continue to add servers and clients in new terminals by following steps 3 and 4 as desired
