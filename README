@@ -13,7 +13,7 @@ To compile and run:
 
 2. Call `./directoryServer5`
 
-3. In a new terminal: `./chatServer5 "KSU Football" 58379` (you may substitute the topic for one listed above and the port for any valid port)
+3. In a new terminal: `./chatServer5 "KSU Football" 58379` (you may substitute the topic for one listed above and the port for any valid port within the same range as specified in the `inet.h` file)
 
 4. In another new terminal: `./chatClient5`
 
