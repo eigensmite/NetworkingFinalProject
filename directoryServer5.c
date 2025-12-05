@@ -27,7 +27,7 @@
 
 // #define CHECK(x) assert((x) >= 0) DONT USE CHECK BECAUSE WE NEED TO GET RETURN VALUES
 
-#define LOOP_CHECK(rval, cmd) \
+// #define LOOP _CHECK(rval, cmd) \
 	do {                  \
 		rval = cmd;   \
 	} while (rval == GNUTLS_E_AGAIN || rval == GNUTLS_E_INTERRUPTED)
@@ -75,6 +75,7 @@ struct staged_connection {
 	char* inptr;                    	// length of data in input buffer (bytes)
 	char outbuf[MAX];			  		// output buffer
 	char* outptr;                    	// length of data in output buffer (bytes)
+	int want_write;						// whether staged connection wants to write
 	LIST_ENTRY(staged_connection) entries;  // BSD list linkage
 };
 
@@ -87,6 +88,7 @@ struct client {
 	TAILQ_HEAD(, outmsg) msgq;  		// message queue
 	char inbuf[MAX];			  		// input buffer
 	char* inptr;                    	// length of data in input buffer (bytes)
+	int want_write;						// whether client wants to write
     LIST_ENTRY(client) client_entries;  // BSD list linkage
 };
 
@@ -99,6 +101,7 @@ struct server {
 	// TAILQ_HEAD(, outmsg) msgq;  		// message queue
 	char outbuf[MAX];			  		// output buffer
 	char* outptr;                    	// length of data in output buffer (bytes)
+	int want_write;						// whether server wants to write
     LIST_ENTRY(server) server_entries;  // BSD list linkage
 };
 
@@ -197,10 +200,11 @@ int main(int argc, char **argv)
 				// Compute max_fd as you go 
         		if (clisockfd > max_fd) {max_fd = clisockfd;}
 			 }	*/
-			if (c->sockfd > 0) {          			// sanity check (usually always > 0)
-        		FD_SET(c->sockfd, &readset);  		// add to read set
-				if (!TAILQ_EMPTY(&c->msgq)) {		// has data to write
-					FD_SET(c->sockfd, &writeset); 	// add to write set
+			if (c->sockfd > 0) {          							// sanity check (usually always > 0)
+				if(c->want_write || !TAILQ_EMPTY(&c->msgq)) {		// wants to write or has data to write
+					FD_SET(c->sockfd, &writeset); 					// add to write
+				} else {
+        			FD_SET(c->sockfd, &readset);  						// add to read set
 				}
 				/* Update max_fd */
         		if (c->sockfd > max_fd) max_fd = c->sockfd;
@@ -209,10 +213,11 @@ int main(int argc, char **argv)
 
 		struct server *s, *tmp_s;
 		LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
-			if (s->sockfd > 0) {          			// sanity check (usually always > 0)
-				FD_SET(s->sockfd, &readset);  		// add to read set
-				if (s->outbuf[0] != '\0') {		// has data to write
-					FD_SET(s->sockfd, &writeset); 	// add to write set
+			if (s->sockfd > 0) {          							// sanity check (usually always > 0)
+				if (s->want_write || (s->outbuf[0] != '\0')) {		// wants to write or has data to write
+					FD_SET(s->sockfd, &writeset); 					// add to write set
+				} else {
+					FD_SET(s->sockfd, &readset);  					// add to read set
 				}
 				/* Update max_fd */
 				if (s->sockfd > max_fd) max_fd = s->sockfd;
@@ -221,10 +226,11 @@ int main(int argc, char **argv)
 
 		struct staged_connection *staged, *tmp_staged;
 		LIST_FOREACH_SAFE(staged, &staged_conns, entries, tmp_staged) {
-			if (staged->sockfd > 0) {          			// sanity check (usually always > 0)
-				FD_SET(staged->sockfd, &readset);  		// add to read set
-				if (staged->outbuf[0] != '\0') {		// has data to write
-					FD_SET(staged->sockfd, &writeset); 	// add to write set
+			if (staged->sockfd > 0) {          									// sanity check (usually always > 0)
+				if (staged->want_write || (staged->outbuf[0] != '\0')) {		// wants to write or has data to write
+					FD_SET(staged->sockfd, &writeset); 							// add to write set
+				} else {
+					FD_SET(staged->sockfd, &readset);  							// add to read set
 				}
 				/* Update max_fd */
 				if (staged->sockfd > max_fd) max_fd = staged->sockfd;
@@ -281,7 +287,6 @@ fflush(stderr);*/
 
 		if (sel < 0) {
 			printf("Select is < 0\n");
-			if (errno == EINTR) continue;
 			perror("select");
 			close(sockfd);
 			return EXIT_FAILURE;
@@ -363,7 +368,16 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 					gnutls_transport_set_int(session, newsockfd);
 
-					LOOP_CHECK(ret, gnutls_handshake(session));
+					ret = gnutls_handshake(session);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						// try again later
+						//printf("Handshake not completed yet, try again later\n");
+						close (newsockfd);
+						gnutls_deinit(session);
+						free(new_staged);
+						printf("Handshake interrupted, try again later\n");
+						continue; 
+					}
 					/* FIXME */
 					/* THIS CODE IS FROM DOCUMENTATION - we must handle it for our application*/
 					if (ret < 0) {
@@ -371,6 +385,7 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						gnutls_deinit(session);
 						fprintf(stderr, "*** Handshake has failed (%s)\n\n",
 							gnutls_strerror(ret));
+						free(new_staged);
 						continue;
 					}
 					printf("- Handshake was completed\n");
@@ -386,6 +401,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 					new_staged->outbuf[0] = '\0';     // initialize output buffer
 					new_staged->outptr = new_staged->outbuf;    // set output pointer to start of
 
+					new_staged->want_write = 0;		// initially doesn't want to write
+
 					LIST_INSERT_HEAD(&staged_conns, new_staged, entries);  // insert at the head
 					printf("Added staged connection %d from addr %s\n", new_staged->sockfd, inet_ntoa(new_staged->addr.sin_addr));
 				}
@@ -395,13 +412,17 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 			// Check server sockets for disconnects
 			LIST_FOREACH_SAFE(s, &servers, server_entries, tmp_s) {
 				int serversockfd = s->sockfd;
+
 				// if server has something to read (a disconnect in our case)
 				if (FD_ISSET(serversockfd, &readset)) {
 					char buf[MAX] = {'\0'};
 					/* ONLY HANDLING DISCONNECTS */
 					//ssize_t nread = read(serversockfd, buf, MAX);
-					LOOP_CHECK(ret, gnutls_record_recv(s->session, buf,
-							   MAX));
+					ret = gnutls_record_recv(s->session, buf, MAX);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						s->want_write = gnutls_record_get_direction(s->session); // update want_write status
+						continue; 
+					}
 
 					printf("Read %d bytes from server %d\n", ret, serversockfd);
 					if (ret == 0) {
@@ -410,9 +431,9 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						continue;
 					}
 					else if (ret < 0) {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
+						//if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
 
-						fprintf(stderr, "%s:%d Error reading from server %d: %s\n", __FILE__, __LINE__, serversockfd, strerror(errno));
+						fprintf(stderr, "%s:%d Error reading from server %d: %s\n", __FILE__, __LINE__, serversockfd, gnutls_strerror(ret));
 
 						remove_server(&servers, s);
 						continue;
@@ -426,13 +447,16 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 					printf("Writing %zu bytes to server %d\n\t\t%s", remaining, serversockfd, s->outptr);
 
-					ret = gnutls_record_send(s->session,
-							s->outptr,
-							remaining);
+					ret = gnutls_record_send(s->session, s->outptr, remaining);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						s->want_write = gnutls_record_get_direction(s->session); // update want_write status
+						continue; 
+					}
 
 					printf("Wrote %d bytes to sever %d\n", ret, serversockfd);
 
 					if (ret > 0) {
+						s->want_write = 0; // reset want_write status
 						s->outptr += ret;
 						if (s->outptr >= &(s->outbuf[MAX])) {
 							//TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
@@ -446,13 +470,14 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 							printf("Disconnected server %d\n", serversockfd);
 						}
 					} else if (ret < 0) {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) {
+						//if (errno == EAGAIN || errno == EWOULDBLOCK) {
 							// try later
-						} else {
+							// ALREADY CHECK GNUTLS_E_AGAIN ABOVE
+						//} else {
 							fprintf(stderr, "Error writing to server %d: %s\n", serversockfd, strerror(errno));
 							remove_server(&servers, s);
 							continue;
-						}
+						//}
 					}
 
 				}
@@ -468,8 +493,11 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 				if (FD_ISSET(clisockfd, &readset)) {
 
 					//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr,
-							   &(c->inbuf[MAX]) - c->inptr));
+					ret = gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						c->want_write = gnutls_record_get_direction(c->session); // update want_write status
+						continue; 
+					}
 
 					printf("Read %d bytes from client %d\n", ret, clisockfd);
 
@@ -484,13 +512,12 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 					}
 					else if (ret < 0) {
 
-						if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
-
-						fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, strerror(errno));
+						fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, gnutls_strerror(ret));
 
 						remove_client(&clients, c);
 						//continue;
 					} else /* if (nread > 0) */ {
+						c->want_write = 0; // reset want_write status
 
 						c->inptr += ret; // advance input pointer
 						if ((c->inptr < &(c->inbuf[MAX]))) continue; // not full message yet
@@ -564,13 +591,16 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 					printf("Writing %zu bytes to client %d\n\t\t> %s", remaining, clisockfd, m->data + m->sent);
 
-					ret = gnutls_record_send(c->session,
-							m->data + m->sent,
-							remaining);
+					ret = gnutls_record_send(c->session, m->data + m->sent, remaining);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						c->want_write = gnutls_record_get_direction(c->session); // update want_write status
+						continue; 
+					}
 
 					printf("Wrote %d bytes to client %d\n", ret, clisockfd);
 
 					if (ret > 0) {
+						c->want_write = 0; // reset want_write status
 						m->sent += ret;
 						if (m->sent == m->len) {
 							TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
@@ -587,13 +617,14 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 							}
 						}
 					} else if (ret < 0) {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) {
-							// try later
-						} else {
+						//if (errno == EAGAIN || errno == EWOULDBLOCK) {
+							// try later,
+							// ALREADY CHECK GNUTLS_E_AGAIN ABOVE
+						//} else {
 							fprintf(stderr, "Error writing to client %d: %s\n", clisockfd, strerror(errno));
 							remove_client(&clients, c);
 							continue;
-						}
+						//}
 					}
 				} 
 
@@ -608,13 +639,19 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 				if (FD_ISSET(stagedsockfd, &readset)) {
 
 					//ssize_t typebytes = read(stagedsockfd, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-					LOOP_CHECK(ret, gnutls_record_recv(staged->session, staged->inptr,
-							   &(staged->inbuf[MAX]) - staged->inptr));
+					ret = gnutls_record_recv(staged->session, staged->inptr, &(staged->inbuf[MAX]) - staged->inptr);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						staged->want_write = gnutls_record_get_direction(staged->session); // update want_write status
+						continue; 
+					}
+
+
 					if (ret <= 0) {
 						fprintf(stderr, "%s:%d Error reading peer type %s\n", __FILE__, __LINE__, staged->inptr);
 						remove_staged_connection(&staged_conns, staged);
 						continue;
 					}
+					staged->want_write = 0; // reset want_write status
 
 					staged->inptr += ret;
 
@@ -710,6 +747,8 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						s->outbuf[0] = '\0';     // initialize output buffer
 						s->outptr = s->outbuf;    // set output pointer to start of
 
+						s->want_write = 0; // initially doesn't want to write
+
 						//char buf[MAX] = {'\0'};
 						//snprintf(buf, MAX, "Welcome, chatroom server for topic '%s'!", s->topic);
 						//write(newsockfd, buf, MAX);
@@ -742,6 +781,7 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						TAILQ_INIT(&c->msgq);	// initialize message queue
 						c->inbuf[0] = '\0';     // initialize input buffer
 						c->inptr = c->inbuf;    // set input pointer to start of
+						c->want_write = 0;		// initially doesn't want to write
 
 						LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
 						printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
@@ -763,13 +803,17 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 
 					printf("Writing %zu bytes to staged cxn %d\n\t\t%s", remaining, stagedsockfd, staged->outptr);
 
-					ret = gnutls_record_send(staged->session,
-							staged->outptr,
-							remaining);
+					ret = gnutls_record_send(staged->session, staged->outptr, remaining);
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						staged->want_write = gnutls_record_get_direction(staged->session); // update want_write status
+						continue; 
+					}
 
 					printf("Wrote %d bytes to staged cxn %d\n", ret, stagedsockfd);
 
 					if (ret > 0) {
+						staged->want_write = 0; // reset want_write status
+						
 						staged->outptr += ret;
 						if (staged->outptr >= &(staged->outbuf[MAX])) {
 							//TAILQ_REMOVE(&c->msgq, m, entries); // sends only one message from queue per iteration, should be fine (Euguene said)
@@ -783,15 +827,10 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 							printf("Disconnected staged cxn %d\n", stagedsockfd);
 						}
 					} else if (ret < 0) {
-						if (errno == EAGAIN || errno == EWOULDBLOCK) {
-							// try later
-						} else {
-							fprintf(stderr, "Error writing to staged cxn %d: %s\n", stagedsockfd, strerror(errno));
+							fprintf(stderr, "Error writing to staged cxn %d: %s\n", stagedsockfd, gnutls_strerror(ret));
 							remove_staged_connection(&staged_conns, staged);
 							continue;
 						}
-					}
-
 				}
 
 			} /*     LIST_FOREACH_SAFE staged connections */
