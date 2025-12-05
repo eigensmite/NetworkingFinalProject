@@ -50,6 +50,7 @@ int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutl
 	gnutls_handshake_set_timeout(*session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 	gnutls_priority_set_direct(*session, "NORMAL", NULL);
     gnutls_session_set_verify_cert(*session, topic, 0);
+    //0 Should enable only default (good) options
 
 	gnutls_transport_set_int(*session, sockfd);
 	int ret = 0;

@@ -294,6 +294,7 @@ int main(int argc, char **argv)
 			gnutls_handshake_set_timeout(session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 			gnutls_priority_set_direct(session, "NORMAL", NULL);
 			gnutls_session_set_verify_cert(session, "Directory Server", 0);
+			//0 Should enable only default (good) options
 			gnutls_transport_set_int(session, newsockfd);
 
 			ret = gnutls_handshake(session);
