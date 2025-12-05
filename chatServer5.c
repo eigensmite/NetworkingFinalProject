@@ -215,7 +215,11 @@ int main(int argc, char **argv)
 			}
 		}
 
-		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
+		struct timeval timeout = {
+			.tv_usec = 500
+		};
+
+		int sel = select(max_fd+1, &readset, &writeset, NULL, &timeout);
 		if (sel < 0) {
             //if (er rno == EINTR) continue;
             perror("select");
