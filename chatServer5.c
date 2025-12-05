@@ -99,7 +99,12 @@ int main(int argc, char **argv)
 	if(sscanf(argv[2], "%d", &port) != 1) {
 		fprintf(stderr, "Invalid port number: %s\n", argv[2]);
 		return EXIT_FAILURE;
-	}	
+	}
+
+	if(port < 49151 || port > 65535){
+		fprintf(stderr, "Invalid port number: %d, should be betweeen 49151 and 65535\n", port);
+		return EXIT_FAILURE;
+	}
 	
 	/* init GnuTLS */
 	
@@ -117,6 +122,9 @@ int main(int argc, char **argv)
 		gnutls_certificate_set_x509_key_file(x509_cred, FRIENDSGIVINGCERT, FRIENDSGIVINGKEY, GNUTLS_X509_FMT_PEM);
 	} else if(strncmp(server_name, "KSU CS Lounge", MAX_USERNAME_LEN) == 0) {
 		gnutls_certificate_set_x509_key_file(x509_cred, LOUNGECERT, LOUNGEKEY, GNUTLS_X509_FMT_PEM);
+	} else{
+		printf("You did not use an expected topic: BeoCat, KSU Football, Friendgiving, KSU CS Lounge\n");
+		return EXIT_FAILURE;
 	}
 
 	//End init GnuTLS
@@ -517,28 +525,28 @@ static int connect_to_directory(const char *server_name, int port, gnutls_sessio
 	gnutls_credentials_set(dir_session, GNUTLS_CRD_CERTIFICATE, x509_cred);
 	gnutls_handshake_set_timeout(dir_session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 	gnutls_priority_set_direct(dir_session, "NORMAL", NULL);
+	gnutls_session_set_verify_cert(dir_session, "Directory Server", 0);
 	gnutls_transport_set_int(dir_session, sockfd);
 	int ret = 0;
 	LOOP_CHECK(ret, gnutls_handshake(dir_session)); // WE CAN CALL LOOP_CHECK HERE BECAUSE connect_to_directory IS BLOCKING
 	if (ret < 0) {
 		close(sockfd);
 		gnutls_deinit(dir_session);
-		fprintf(stderr, "*** Handshake has failed (%s)\n\n",
-			gnutls_strerror(ret));
+		fprintf(stderr, "*** Handshake has failed (%s)\n\n", gnutls_strerror(ret));
 		return EXIT_FAILURE;
 	}
 	printf("- Handshake was completed\n");
 
     // Send handshake: "SERVER <port> <server_name>"
-    char handshake[MAX] = {0};
-    snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
+	char handshake[MAX] = {0};
+	snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
 	printf("Sending handshake to directory server.\n\tHandshake: %s", handshake);
 	LOOP_CHECK(ret, gnutls_record_send(dir_session, handshake, MAX)); // LOOP_CHECK because this connection is necessary
-    if (ret < 0) {
-        perror("handshake failed");
-        close(sockfd);
-        return -1;
-    }
+	if (ret < 0) {
+		fprintf(stderr, "*** Protocol handshake has failed (%s)\n\n", gnutls_strerror(ret));
+		close(sockfd);
+		return -1;
+	}
 
     return sockfd; // idle connection
 }
