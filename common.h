@@ -19,7 +19,7 @@
 
 #define MAX_USERNAME_LEN 24
 
-#define MAX_CLIENTS 2
-#define MAX_SERVERS 2
+#define MAX_CLIENTS 5
+#define MAX_SERVERS 4
 
 #pragma GCC diagnostic pop

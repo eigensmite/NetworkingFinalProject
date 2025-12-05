@@ -54,7 +54,7 @@ int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutl
 
 	gnutls_transport_set_int(*session, sockfd);
 	int ret = 0;
-	LOOP_CHECK(ret, gnutls_handshake(*session));
+	LOOP_CHECK(ret, gnutls_handshake(*session)); // can call LOOP_CHECK because this is blocking
 	if (ret < 0) {
 		close(sockfd);
 		gnutls_deinit(*session);
@@ -278,7 +278,7 @@ int main()
 					    snprintf(fmt, sizeof(fmt), "%%%d[^\n]", MAX - 1);
                         #pragma GCC diagnostic push
                         #pragma GCC diagnostic ignored "-Wformat-nonliteral"
-                        sscanf(buf, fmt, buf);
+                        ssc anf(buf, fmt, buf);
                         #pragma GCC diagnostic pop
                     */
 

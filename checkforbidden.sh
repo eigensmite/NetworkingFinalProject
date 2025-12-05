@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FILES="chatClient5.c chatServer5. directoryServer5.c"
+FILES="chatClient5.c chatServer5.c directoryServer5.c"
 
 FUNCS=(
     strlen

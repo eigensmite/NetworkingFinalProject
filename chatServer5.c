@@ -26,7 +26,7 @@
 
 /* Code from GnuTLS documentation */
 
-#define CHECK(x) assert((x) >= 0)
+// #define CHECK(x) assert((x) >= 0)
 #define LOOP_CHECK(rval, cmd) \
 	do {                  \
 		rval = cmd;   \
