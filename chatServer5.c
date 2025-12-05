@@ -66,6 +66,7 @@ struct client {
 	TAILQ_HEAD(, outmsg) msgq;  		// message queue
 	char inbuf[MAX];			  		// input buffer
 	char* inptr;                    	// length of data in input buffer (bytes)
+	int want_write;						// whether client wants to write
     LIST_ENTRY(client) client_entries;  // BSD list linkage
 };
 
@@ -185,6 +186,7 @@ int main(int argc, char **argv)
 		// Add directory server socket
 		FD_SET(dir_sock, &readset);
 		if (dir_sock > max_fd) max_fd = dir_sock;
+	
 
 		// Add listening socket to read set
 		FD_SET(sockfd, &readset);
@@ -195,11 +197,11 @@ int main(int argc, char **argv)
 		/* clisockfd is used as an example socket -- we never populated it so it's invalid */		
 		struct client *c, *tmp;
 		LIST_FOREACH_SAFE(c, &clients, client_entries, tmp) {
-    		if (c->sockfd > 0) {          			// sanity check (usually always > 0)
-        		FD_SET(c->sockfd, &readset);  		// add to read set
-				if (!TAILQ_EMPTY(&c->msgq)) {		// has data to write
-					FD_SET(c->sockfd, &writeset); 	// add to write set
-				}
+    		if (c->sockfd > 0) {          							// sanity check (usually always > 0)
+				if (c->want_write || !TAILQ_EMPTY(&c->msgq)) {		// wants to write or has data to write
+					FD_SET(c->sockfd, &writeset); 					// add to write set
+				} else FD_SET(c->sockfd, &readset);  				// add to read set
+
 				/* Update max_fd */
         		if (c->sockfd > max_fd) max_fd = c->sockfd;
 			}
@@ -207,10 +209,11 @@ int main(int argc, char **argv)
 
 		int sel = select(max_fd+1, &readset, &writeset, NULL, NULL);
 		if (sel < 0) {
-            if (errno == EINTR) continue;
+            //if (er rno == EINTR) continue;
             perror("select");
             break;
         } else if (sel == 0) continue; /* shouldn't happen with NULL timeout */
+
 
 
 		// Check if directory server disconnected
@@ -219,21 +222,34 @@ int main(int argc, char **argv)
 			// (only possible if disconnected)
 
 			char buf[MAX] = {'\0'};
-			LOOP_CHECK(ret, gnutls_record_recv(dir_session, buf, MAX));
-
-			if (ret > 0) {
-				printf("Read %d bytes from dirserv %d\n", ret, dir_sock);
+			ret = gnutls_record_recv(dir_session, buf, MAX); // DON'T USE LOOP_ CHECK HERE, IT IS BLOCKING!
+			if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+				continue; // try again later
+			} else if (ret > 0) {
+				printf("Read %d bytes from directory server %d\n", ret, dir_sock);
 				printf("\nDisconnected for cause:\n %s\n", buf);
-			} else {
+			} else if (ret < 0) {
 				fprintf(stderr, "Disconnected. Check dir server to see cause\n");
 				fprintf(stderr, "1) non-unique topic,\n");
 				fprintf(stderr, "2) disallowed name\n(only BeoCat, KSU Football, Friendsgiving, KSU CS Lounge),\n");
 				fprintf(stderr, "3) maximum servers reached, or\n");
 				fprintf(stderr, "4) directory server died\n");
+			} else if (ret == 0) {
+				fprintf(stderr, "Directory server closed connection.\n");
 			}
 			
+
+			gnutls_bye(dir_session, GNUTLS_SHUT_RDWR);
 			close(dir_sock);
+			
 			close(sockfd);
+
+			LIST_FOREACH_SAFE(c, &clients, client_entries, tmp) {
+				remove_client(&clients, c);
+			}
+
+			gnutls_global_deinit();
+
 			return EXIT_FAILURE;
 		}
 
@@ -279,8 +295,15 @@ int main(int argc, char **argv)
 			gnutls_priority_set_direct(session, "NORMAL", NULL);
 			gnutls_transport_set_int(session, newsockfd);
 
-			LOOP_CHECK(ret, gnutls_handshake(session));
-			if (ret < 0) {
+			ret = gnutls_handshake(session);
+			if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+				// Non-fatal, try again later
+				fprintf(stderr, "Non-fatal handshake interruption from client %s. Try again later.\n", inet_ntoa(cli_addr.sin_addr));
+				close(newsockfd);
+				gnutls_deinit(session);
+				free(c);
+				continue;
+			} else if (ret < 0) {
 				close(newsockfd);
 				gnutls_deinit(session);
 				fprintf(stderr, "*** handshake has failed (%s)\n\n", gnutls_strerror(ret));
@@ -297,6 +320,7 @@ int main(int argc, char **argv)
 			TAILQ_INIT(&c->msgq);	// initialize message queue
 			c->inbuf[0] = '\0';     // initialize input buffer
 			c->inptr = c->inbuf;    // set input pointer to start of
+			c->want_write = 0;		// initially doesn't want to write
 			
 			LIST_INSERT_HEAD(&clients, c, client_entries);  // insert at the head
 			printf("Added client %d from addr %s\n", c->sockfd, inet_ntoa(c->addr.sin_addr));
@@ -312,7 +336,12 @@ int main(int argc, char **argv)
 
 				/* Read the request from the client */
 				//ssize_t nread = read(clisockfd, c->inptr, &(c->inbuf[MAX]) - c->inptr); //MAX - 1 reads 99 bytes, so MAX is correct
-				LOOP_CHECK(ret, gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr));
+				ret = gnutls_record_recv(c->session, c->inptr, &(c->inbuf[MAX]) - c->inptr);
+				if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+					c->want_write = gnutls_record_get_direction(c->session); // update want_write status
+					continue; // try again later
+				}
+				
 				printf("Read %d bytes from client %d\n", ret, clisockfd);
 				printf("Buffer now: %s\n", c->inbuf);
 				// IF READ LENGTH IS ZERO, CLIENT DISCONNECTS. THIS CAN HAPPEN INADVERTENTLY IF 
@@ -330,10 +359,11 @@ int main(int argc, char **argv)
 					//fprintf(stderr, "%s:%d Error reading from client\n", __FILE__, __LINE__);
 
 					/* Not every error is fatal. Check the return value and act accordingly. */
-					if (errno == EAGAIN || errno == EWOULDBLOCK) continue; // try again later
+					// if (er rno == EAGAIN || er rno == EWOULDBLOCK) continue; // try again later
+					// ALready check GNUUTLS_E_AGAIN and GNUTLS_E_INTERRUPTED above
 
 					/* real error reading from client */
-					fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, strerror(errno));
+					fprintf(stderr, "%s:%d Error reading from client %d: %s\n", __FILE__, __LINE__, clisockfd, gnutls_strerror(ret));
 					char msg[MAX];
 					snprintf(msg, sizeof(msg), "<Server> %s has left the chat.", c->nickname);
 					broadcast_message(&clients, clisockfd, msg);
@@ -341,6 +371,8 @@ int main(int argc, char **argv)
 					//continue;
 				}
 				else /* if (nread > 0) */ {
+
+					c->want_write = 0; // reset want_write status
 				
 					//fprintf(stderr, "Read %zd bytes from client %d\n", nread, clisockfd);
 					c->inptr += ret; // advance input pointer
@@ -444,11 +476,13 @@ int main(int argc, char **argv)
 						free(m->data);
 						free(m);
 					}
+					c->want_write = 0; // reset want_write status
 				} else if (ret < 0) {
-					if (errno == EAGAIN || errno == EWOULDBLOCK) {
-						// try later 
+					if (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED) {
+						c->want_write = gnutls_record_get_direction(c->session); // update want_write status
+						continue; // try later 
 					} else {
-						fprintf(stderr, "Error writing to client %d: %s\n", clisockfd, strerror(errno));
+						fprintf(stderr, "Error writing to client %d: %s\n", clisockfd, gnutls_strerror(ret));
 						remove_client(&clients, c);
 						continue;
 					}
@@ -483,7 +517,7 @@ static int connect_to_directory(const char *server_name, int port, gnutls_sessio
 	gnutls_priority_set_direct(dir_session, "NORMAL", NULL);
 	gnutls_transport_set_int(dir_session, sockfd);
 	int ret = 0;
-	LOOP_CHECK(ret, gnutls_handshake(dir_session));
+	LOOP_CHECK(ret, gnutls_handshake(dir_session)); // WE CAN CALL LOOP_CHECK HERE BECAUSE connect_to_directory IS BLOCKING
 	if (ret < 0) {
 		close(sockfd);
 		gnutls_deinit(dir_session);
@@ -497,7 +531,7 @@ static int connect_to_directory(const char *server_name, int port, gnutls_sessio
     char handshake[MAX] = {0};
     snprintf(handshake, sizeof(handshake), "SERVER %d %s\n", port, server_name);
 	printf("Sending handshake to directory server.\n\tHandshake: %s", handshake);
-	CHECK(ret = gnutls_record_send(dir_session, handshake, MAX));
+	LOOP_CHECK(ret, gnutls_record_send(dir_session, handshake, MAX)); // LOOP_CHECK because this connection is necessary
     if (ret < 0) {
         perror("handshake failed");
         close(sockfd);
@@ -556,6 +590,8 @@ static void remove_client(struct clientlist *clients, struct client *c) {
 			free(m);
 		}
 
+		gnutls_bye(c->session, GNUTLS_SHUT_RDWR); // close TLS session
+		gnutls_deinit(c->session);
 		close(c->sockfd);
 		LIST_REMOVE(c, client_entries);
 		free(c);
