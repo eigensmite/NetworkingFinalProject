@@ -293,6 +293,7 @@ int main(int argc, char **argv)
 			gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, x509_cred);
 			gnutls_handshake_set_timeout(session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 			gnutls_priority_set_direct(session, "NORMAL", NULL);
+			gnutls_session_set_verify_cert(session, "Directory Server", 0);
 			gnutls_transport_set_int(session, newsockfd);
 
 			ret = gnutls_handshake(session);

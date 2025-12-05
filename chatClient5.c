@@ -25,7 +25,7 @@
 
 /* End code from GnuTLS documentation */
 
-int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutls_certificate_credentials_t x509_cred) {
+int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutls_certificate_credentials_t x509_cred, char* topic) {
     printf("Connecting to a server\n");
     int sockfd;
     struct sockaddr_in serv_addr;
@@ -49,6 +49,8 @@ int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutl
     gnutls_credentials_set(*session, GNUTLS_CRD_CERTIFICATE, x509_cred);
 	gnutls_handshake_set_timeout(*session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
 	gnutls_priority_set_direct(*session, "NORMAL", NULL);
+    gnutls_session_set_verify_cert(*session, topic, 0);
+
 	gnutls_transport_set_int(*session, sockfd);
 	int ret = 0;
 	LOOP_CHECK(ret, gnutls_handshake(*session));
@@ -59,6 +61,7 @@ int connect_to_server(const char *ip, int port, gnutls_session_t *session, gnutl
 			gnutls_strerror(ret));
 		return -1;
 	}
+
 	printf("- Handshake was completed\n");
 
     //Parse directory server connection
@@ -85,7 +88,7 @@ int main()
 	//gnutls_certificate_set_x509_key_file(x509_cred, CERTFILE, KEYFILE, GNUTLS_X509_FMT_PEM); //We don't have credentials as the client (in this case)
 
     /* --- Connect to directory server --- */
-    dir_sock = connect_to_server(SERV_HOST_ADDR, SERV_TCP_PORT, &dir_session, x509_cred);
+    dir_sock = connect_to_server(SERV_HOST_ADDR, SERV_TCP_PORT, &dir_session, x509_cred, "Directory Server");
     if (dir_sock < 0) return EXIT_FAILURE;
 
     fprintf(stderr, "Connected to directory server at %s:%d\n", SERV_HOST_ADDR, SERV_TCP_PORT);
@@ -201,14 +204,15 @@ int main()
             if (strncmp(buf, "SERVER_INFO ", 12) == 0) {
                 printf("Directory server provided server info: %s\n", buf);
                 /* Parse IP and PORT */
-                if (sscanf(buf + 12, "%63s %d", server_ip, &server_port) != 2) {
+                char server_topic[MAX];
+                if (sscanf(buf + 12, "%63s %d %[^\n\t]", server_ip, &server_port, server_topic) != 3) {
                     fprintf(stderr, "Malformed SERVER_INFO: %s\n", buf);
                     close(dir_sock);
                     return EXIT_FAILURE;
                 }
 
                 /* Connect to selected server */
-                sockfd = connect_to_server(server_ip, server_port, &server_session, x509_cred);
+                sockfd = connect_to_server(server_ip, server_port, &server_session, x509_cred, server_topic);
                 if (sockfd < 0) {
                     fprintf(stderr, "Failed to connect to server %s:%d\n", server_ip, server_port);
                     close(dir_sock);

@@ -565,7 +565,7 @@ if (fcntl(sockfd, F_GETFL) == -1) {
 						fprintf(stderr, "Client %d chose server %d. (%s:%d)\n", clisockfd, choice, ip, port);
 
 
-						snprintf(msg, MAX, "SERVER_INFO %s %d\n", ip, port);
+						snprintf(msg, MAX, "SERVER_INFO %s %d %s\n", ip, port, selected->topic);
 						
 						c->redirecting = 1;
 						queue_message(c, msg);
